@@ -1,0 +1,157 @@
+name: Release Process
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  verify-branch:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        fetch-depth: 0
+
+    - name: Check if tag is on correct branch
+      run: |
+        TAG_NAME=${GITHUB_REF#refs/tags/}
+        # Get the branch this tag is on
+        BRANCH=$(git branch -r --contains $TAG_NAME | grep -v HEAD | sed -e 's/.*origin\///')
+        # Extract major.minor from tag (e.g., v1.16.0 -> v1.16)
+        TAG_BASE=$(echo $TAG_NAME | sed -E 's/v([0-9]+\.[0-9]+)\.[0-9]+/v\1/')
+        # Expected branch name
+        EXPECTED_BRANCH="${TAG_BASE}.x"
+
+        if [[ ! $BRANCH =~ $EXPECTED_BRANCH ]]; then
+          echo "Error: Tag $TAG_NAME must be on branch $EXPECTED_BRANCH, but was found on $BRANCH"
+          exit 1
+        fi
+        echo "Tag is on correct branch $BRANCH"
+
+  prepare-next-dev-version:
+    needs: verify-branch
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        fetch-depth: 0
+
+    - name: Get branch name for tag
+      id: get-branch
+      run: |
+        TAG_NAME=${GITHUB_REF#refs/tags/}
+        TAG_BASE=$(echo $TAG_NAME | sed -E 's/v([0-9]+\.[0-9]+)\.[0-9]+/v\1/')
+        echo "BRANCH=${TAG_BASE}.x" >> $GITHUB_OUTPUT
+
+    - name: Update AC_INIT version for next development cycle
+      run: |
+        # Extract version from tag
+        VERSION=${GITHUB_REF#refs/tags/v}
+        # Increment patch version and add 'a1' suffix
+        NEW_VERSION=$(echo $VERSION | awk -F. '{$NF = $NF + 1; print $0"a1"}' OFS=.)
+        sed -i "s/AC_INIT(\[aws-ofi-nccl\], \[[0-9.]*\])/AC_INIT([aws-ofi-nccl], [${NEW_VERSION}])/" configure.ac
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add configure.ac
+        git commit -m "Bump version to ${NEW_VERSION} for development"
+        git push origin HEAD:${{ steps.get-branch.outputs.BRANCH }}
+
+  create-draft-release:
+    needs: prepare-next-dev-version
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        fetch-depth: 0
+        ref: ${{ github.ref }}  # Checkout the tag
+
+    - name: Set up environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y automake autoconf libtool
+
+    - name: Extract version from tag
+      id: get_version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+    - name: Configure and build
+      run: |
+        ./autogen.sh
+        ./configure --with-libfabric=/opt/amazon/efa --with-cuda=/usr/local/cuda
+        make dist
+
+    - name: Generate source packages
+      run: |
+        ./contrib/scripts/generate_source_packages.sh ${{ github.ref }}
+
+    - name: Extract release notes
+      id: extract_notes
+      run: |
+        VERSION=${{ steps.get_version.outputs.VERSION }}
+        NOTES=$(awk "/# v${VERSION//./\\.}/,/^# v[0-9]+/" RELEASENOTES.md | sed '/^# v[0-9]\+/d')
+        echo "RELEASE_NOTES<<EOF" >> $GITHUB_OUTPUT
+        echo "$NOTES" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ github.ref }}
+        body: ${{ steps.extract_notes.outputs.RELEASE_NOTES }}
+        draft: true
+        prerelease: false
+
+    - name: Upload Release Assets
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./aws-ofi-nccl-${{ steps.get_version.outputs.VERSION }}.tar.gz
+        asset_name: aws-ofi-nccl-${{ steps.get_version.outputs.VERSION }}.tar.gz
+        asset_content_type: application/gzip
+
+    - name: Upload Debian Source Package
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./aws-ofi-nccl_${{ steps.get_version.outputs.VERSION }}-1.debian.tar.xz
+        asset_name: aws-ofi-nccl_${{ steps.get_version.outputs.VERSION }}-1.debian.tar.xz
+        asset_content_type: application/x-xz
+
+    - name: Upload Debian Source Control File
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./aws-ofi-nccl_${{ steps.get_version.outputs.VERSION }}-1.dsc
+        asset_name: aws-ofi-nccl_${{ steps.get_version.outputs.VERSION }}-1.dsc
+        asset_content_type: text/plain
+
+    - name: Upload Original Source Tarball
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./aws-ofi-nccl_${{ steps.get_version.outputs.VERSION }}.orig.tar.gz
+        asset_name: aws-ofi-nccl_${{ steps.get_version.outputs.VERSION }}.orig.tar.gz
+        asset_content_type: application/gzip
+
+    - name: Upload RPM Source Package
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./libnccl-ofi-${{ steps.get_version.outputs.VERSION }}-1.src.rpm
+        asset_name: libnccl-ofi-${{ steps.get_version.outputs.VERSION }}-1.src.rpm
+        asset_content_type: application/x-rpm
