@@ -53,6 +53,7 @@ jobs:
       - name: Prepare release notes
         if: matrix.generate_packages
         run: |
+          set -x
           VERSION=${{ github.ref_name }}
           awk -v version="$VERSION" '
           BEGIN { found=0; printing=0; }
@@ -65,14 +66,16 @@ jobs:
               exit 1
             }
           }' RELEASENOTES.md > RELEASE_NOTES.md
-          
+
           # Extract version without 'v' prefix for tarball name
           TARBALL_VERSION=$(echo $VERSION | sed 's/^v//')
           TARBALL_NAME="aws-ofi-nccl-${TARBALL_VERSION}.tar.gz"
-          
+          TARBALL_NAME_TEST="aws-ofi-nccl-*.tar.gz"
+
           # Calculate SHA512 checksum for the tarball and format it properly
           CHECKSUM=$(sha512sum ${TARBALL_NAME})
-          
+          CHECKSUM_TEST=$(sha512sum ${TARBALL_NAME_TEST})
+
           # Append checksum information to release notes in the exact format of the v1.16.0 release
           echo -e "\nChecksum (sha512) for the release tarball aws-ofi-nccl-${TARBALL_VERSION}.tar.gz:\n\n\`\`\`\n${CHECKSUM}\n\`\`\`" >> RELEASE_NOTES.md
 
