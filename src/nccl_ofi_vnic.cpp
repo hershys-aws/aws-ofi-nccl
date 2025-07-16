@@ -1,11 +1,11 @@
 #include "nccl_ofi.h"
 #include "nccl_ofi_rdma.h"
-#include <stdlib.h>
+#include "core.h"
+#include "topo.h"
+#include "utils.h"
 
-/* Helper function to check if device is virtual */
-static inline bool is_virtual_device(nccl_net_ofi_rdma_device_t *device) {
-    return (device->physical_device_refs != NULL && device->num_physical_devs > 0);
-}
+/* Plugin instance */
+extern nccl_net_ofi_rdma_plugin_t* plugin;
 
 /* Get physical device reference */
 static nccl_net_ofi_rdma_device_t* get_physical_device(int dev_idx) {
@@ -27,9 +27,9 @@ ncclResult_t nccl_net_ofi_rdma_make_virtual_dev(int* d, int* physical_devs, int 
     device->base = first_dev->base;
 
     /* Override virtual device functions */
-    device->base.get_properties = nccl_net_ofi_rdma_get_virtual_properties;
+    device->base.get_properties = (int (*)(nccl_net_ofi_device_t*, nccl_ofi_properties_t*))nccl_net_ofi_rdma_get_virtual_properties;
     device->base.get_domain = nccl_net_ofi_rdma_get_virtual_domain;
-    device->base.get_mr_key = nccl_net_ofi_rdma_get_virtual_mr_key;
+    device->base.get_mr_key = (int (*)(nccl_net_ofi_device_t*, void*, uint64_t*))nccl_net_ofi_rdma_get_virtual_mr_key;
 
     /* Register with plugin */
     *d = plugin->base.p_num_devs++;
