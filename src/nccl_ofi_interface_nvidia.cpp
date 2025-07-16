@@ -480,6 +480,30 @@ NCCL_OFI_EXPORT_SYMBOL ncclNet_v8_t ncclNetPlugin_v8 = {
         .irecvConsumed = NULL,
 };
 
+static ncclResult_t nccl_net_ofi_makeVDevice_v9(int* d, ncclNetVDeviceProps_t* props)
+{
+    /* Validate input parameters */
+    if (props->ndevs > NCCL_NET_MAX_DEVS_PER_NIC_V9 || props->ndevs <= 0) {
+        NCCL_OFI_WARN("Invalid number of devices: %d", props->ndevs);
+        return ncclInvalidArgument;
+    }
+    
+    /* Create array of physical device indices */
+    int *physical_devs = (int*)calloc(props->ndevs, sizeof(int));
+    if (!physical_devs) {
+        NCCL_OFI_WARN("Failed to allocate memory for physical device references");
+        return ncclSystemError;
+    }
+    
+    /* Copy device indices */
+    for (int i = 0; i < props->ndevs; i++) {
+        physical_devs[i] = props->devs[i];
+    }
+    
+    /* Call implementation function */
+    return nccl_net_ofi_rdma_make_virtual_dev(d, physical_devs, props->ndevs);
+}
+
 NCCL_OFI_EXPORT_SYMBOL ncclNet_v9_t ncclNetPlugin_v9 = {
         .name = "Libfabric",
         .init = nccl_net_ofi_init_v2,
@@ -500,7 +524,7 @@ NCCL_OFI_EXPORT_SYMBOL ncclNet_v9_t ncclNetPlugin_v9 = {
         .closeListen = nccl_net_ofi_closeListen_v2,
         .getDeviceMr = NULL,
         .irecvConsumed = NULL,
-        .makeVDevice = NULL,
+        .makeVDevice = nccl_net_ofi_makeVDevice_v9,
 };
 
 NCCL_OFI_EXPORT_SYMBOL ncclNet_v10_t ncclNetPlugin_v10 = {
@@ -523,7 +547,7 @@ NCCL_OFI_EXPORT_SYMBOL ncclNet_v10_t ncclNetPlugin_v10 = {
         .closeListen = nccl_net_ofi_closeListen_v2,
         .getDeviceMr = NULL,
         .irecvConsumed = NULL,
-        .makeVDevice = NULL,
+        .makeVDevice = nccl_net_ofi_makeVDevice_v9,
 };
 
 } /* extern "C" */
@@ -561,4 +585,22 @@ __attribute__((constructor)) static void nvidia_plugin_name_fixup(void)
 		ncclNetPlugin_v9.name = "OFI";
 		ncclNetPlugin_v10.name = "OFI";
 	}
+}
+/* Add makeVDevice implementation */
+ncclResult_t nccl_net_ofi_makeVDevice_v9(int* d, ncclNetVDeviceProps_t* props) {
+    /* Validate input */
+    if (props->ndevs > NCCL_NET_MAX_DEVS_PER_NIC_V9 || props->ndevs <= 0) {
+        NCCL_OFI_WARN("Invalid number of devices: %d", props->ndevs);
+        return ncclInvalidArgument;
+    }
+    
+    /* Create physical device array */
+    int *physical_devs = (int*)calloc(props->ndevs, sizeof(int));
+    if (!physical_devs) return ncclSystemError;
+    
+    /* Copy device indices */
+    memcpy(physical_devs, props->devs, props->ndevs * sizeof(int));
+    
+    /* Create virtual device */
+    return nccl_net_ofi_rdma_make_virtual_dev(d, physical_devs, props->ndevs);
 }

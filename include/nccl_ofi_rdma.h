@@ -1183,6 +1183,10 @@ typedef struct nccl_net_ofi_rdma_device {
 
 	bool use_long_rkeys;
 
+	/* Virtual device support */
+	int *physical_device_refs;  /* C-style array of physical device indices */
+	int num_physical_devs;      /* Number of physical devices in the array */
+
 #if HAVE_NVTX_TRACING
 	nvtxDomainHandle_t nvtx_domain[MAX_NUM_RAILS];
 #endif
@@ -1196,6 +1200,13 @@ struct nccl_net_ofi_rdma_plugin {
 };
 typedef struct nccl_net_ofi_rdma_plugin nccl_net_ofi_rdma_plugin_t;
 
+/*
+ * @brief Check if a device is a virtual device
+ */
+static inline bool is_virtual_device(nccl_net_ofi_rdma_device_t *device)
+{
+	return (device->physical_device_refs != NULL && device->num_physical_devs > 0);
+}
 
 /*
  * @brief	Initialize plugin with rdma protocol structures
@@ -1203,5 +1214,39 @@ typedef struct nccl_net_ofi_rdma_plugin nccl_net_ofi_rdma_plugin_t;
 int nccl_net_ofi_rdma_init(const char *provider_filter,
 			   nccl_net_ofi_plugin_t **plugin_p,
 			   bool *found_multi_rail);
+
+/*
+ * @brief Create a virtual device from physical devices
+ */
+ncclResult_t nccl_net_ofi_rdma_make_virtual_dev(int* d, int* physical_devs, int num_physical_devs);
+
+/*
+ * @brief Get properties of a virtual device
+ */
+int nccl_net_ofi_rdma_get_virtual_properties(nccl_net_ofi_device_t *base_dev, nccl_ofi_properties_t *props);
+
+/*
+ * @brief Get domain for a virtual device
+ */
+nccl_net_ofi_domain_t *nccl_net_ofi_rdma_get_virtual_domain(nccl_net_ofi_device_t *dev);
+
+/*
+ * @brief Get MR key for a virtual device
+ */
+int nccl_net_ofi_rdma_get_virtual_mr_key(nccl_net_ofi_device_t *base_dev, void* mhandle, uint64_t* mr_key);
+
+/* Virtual device support functions */
+static inline bool is_virtual_device(nccl_net_ofi_rdma_device_t *device) {
+    return (device->physical_device_refs != NULL && device->num_physical_devs > 0);
+}
+
+/* NCCL V9 API implementation */
+ncclResult_t nccl_net_ofi_makeVDevice_v9(int* d, ncclNetVDeviceProps_t* props);
+
+/* Virtual device core functions */
+ncclResult_t nccl_net_ofi_rdma_make_virtual_dev(int* d, int* physical_devs, int num_physical_devs);
+ncclResult_t nccl_net_ofi_rdma_get_virtual_properties(nccl_net_ofi_device_t *base_dev, nccl_ofi_properties_t *props);
+nccl_net_ofi_domain_t* nccl_net_ofi_rdma_get_virtual_domain(nccl_net_ofi_device_t *dev);
+ncclResult_t nccl_net_ofi_rdma_get_virtual_mr_key(nccl_net_ofi_device_t *base_dev, void* mhandle, uint64_t* mr_key);
 
 #endif // End NCCL_OFI_RDMA_H_
