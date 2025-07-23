@@ -389,8 +389,9 @@ static int write_topo_file(nccl_ofi_topo_t *topo)
 		goto error;
 	}
 
+	// TODO: Disable this if vNic Path is enabled
 	/* Set topology file path environment variable `NCCL_TOPO_FILE` */
-	env_manager::getInstance().insert_envvar("NCCL_TOPO_FILE", filename, true);
+	// env_manager::getInstance().insert_envvar("NCCL_TOPO_FILE", filename, true);
 
 	goto exit;
 
@@ -522,6 +523,30 @@ static inline int get_properties(nccl_net_ofi_device_t *base_dev,
 	props->rma_supported = 1;
 	assert(is_max_write_inline_size_initialized);
 	props->max_write_inline_size = max_write_inline_size;
+
+	/* Derive vProps from rails - collect unique source device IDs */
+	int unique_devs[NCCL_NET_MAX_DEVS_PER_NIC];
+	int num_unique = 0;
+	
+	for (int i = 0; i < device->num_rails; i++) {
+		int source_dev = device->device_rails[i].source_dev_id;
+		// Check if we've already seen this device
+		bool found = false;
+		for (int j = 0; j < num_unique; j++) {
+			if (unique_devs[j] == source_dev) {
+				found = true;
+				break;
+			}
+		}
+		if (!found && num_unique < NCCL_NET_MAX_DEVS_PER_NIC) {
+			unique_devs[num_unique++] = source_dev;
+		}
+	}
+	
+	props->vProps.ndevs = num_unique;
+	for (int i = 0; i < num_unique; i++) {
+		props->vProps.devs[i] = unique_devs[i];
+	}
 
 	/* 
 	 * Actual max tansfer size is the min size between the interface and
@@ -7135,6 +7160,11 @@ static nccl_net_ofi_rdma_device_t *nccl_net_ofi_rdma_device_create(
 		goto error;
 	}
 
+	/* Set source device ID for all rails (for physical devices, it's the device itself) */
+	for (int i = 0; i < device->num_rails; i++) {
+		device->device_rails[i].source_dev_id = dev_id;
+	}
+
 	if (info_list->domain_attr->mr_key_size <= NCCL_NET_OFI_CTRL_MSG_SHORT_KEY_SIZE) {
 		device->use_long_rkeys = false;
 	} else {
@@ -7251,6 +7281,163 @@ static inline int nccl_net_ofi_rdma_plugin_fini(nccl_net_ofi_plugin_t *plugin)
 	return last_error;
 }
 
+/*
+ * @brief	Extract and combine fi_info lists from multiple physical devices
+ *
+ * This function extracts all rails from the specified physical devices and
+ * combines them into a single fi_info list that can be used to create a
+ * virtual device using the standard device creation path.
+ *
+ * @param	plugin
+ *		Plugin instance
+ * @param	props
+ *		Virtual device properties containing device IDs to combine
+ *
+ * @return	Combined fi_info list on success, NULL on failure
+ */
+static fi_info* extract_combined_rails(nccl_net_ofi_plugin_t *plugin,
+                                       ncclNetVDeviceProps_t *props)
+{
+    // RAII wrapper for fi_info with automatic cleanup
+    auto make_fi_info = [](fi_info* info) {
+        return std::unique_ptr<fi_info, void(*)(fi_info*)>(info, [](fi_info* p) {
+            if (p) fi_freeinfo(p);
+        });
+    };
+
+    // Create RDMA hints for filtering
+    auto hints = make_fi_info(fi_allocinfo());
+    if (!hints) {
+        NCCL_OFI_WARN("extract_combined_rails: Failed to allocate hints");
+        return nullptr;
+    }
+    get_hints(hints.get());
+
+    // Lambda to find best matching configuration
+    auto find_best_config = [&hints](fi_info* available_configs) -> fi_info* {
+        for (auto* config = available_configs; config; config = config->next) {
+            if (hints->ep_attr && config->ep_attr->type == hints->ep_attr->type &&
+                hints->caps && (config->caps & hints->caps) == hints->caps) {
+                return config;
+            }
+        }
+        return available_configs; // Fallback to first available
+    };
+
+    fi_info* combined_list = nullptr;
+    fi_info* list_tail = nullptr;
+
+    try {
+        // Process each device NCCL wants us to combine
+        for (int i = 0; i < props->ndevs; ++i) {
+            auto* phys_dev = plugin->get_device(plugin, props->devs[i]);
+            if (!phys_dev) {
+                NCCL_OFI_WARN("extract_combined_rails: failed to get device %d", props->devs[i]);
+                throw std::runtime_error("Failed to get physical device");
+            }
+
+            auto* rdma_dev = reinterpret_cast<nccl_net_ofi_rdma_device_t*>(phys_dev);
+
+            // Process all rails from this device
+            for (int rail = 0; rail < rdma_dev->num_rails; ++rail) {
+                // Find best config and duplicate it
+                auto* best_config = find_best_config(rdma_dev->device_rails[rail].info);
+                auto rail_info = make_fi_info(fi_dupinfo(best_config));
+
+                if (!rail_info) {
+                    NCCL_OFI_WARN("extract_combined_rails: failed to duplicate rail %d from device %d", rail, props->devs[i]);
+                    throw std::runtime_error("Failed to duplicate rail info");
+                }
+
+                rail_info->next = nullptr;  // Break any existing chain
+
+                // Add to list - just two lines!
+                if (!combined_list) {
+                    combined_list = list_tail = rail_info.release();
+                } else {
+                    list_tail = list_tail->next = rail_info.release();
+                }
+            }
+        }
+
+        return combined_list;
+
+    } catch (const std::exception& e) {
+        NCCL_OFI_INFO(NCCL_INIT, "extract_combined_rails: ERROR - %s", e.what());
+        if (combined_list) fi_freeinfo(combined_list);
+        return nullptr;
+    }
+}
+
+
+static ncclResult_t nccl_net_ofi_rdma_makevdevice_impl(nccl_net_ofi_plugin_t *plugin,
+						       int *deviceIndex,
+						       ncclNetVDeviceProps_t *props)
+{
+	// 1. Find next available device index
+	size_t new_dev_idx = plugin->p_num_devs;
+	NCCL_OFI_INFO(NCCL_INIT, "makeVDevice Step 1: Current plugin has %zu devices, new virtual device will be index %zu\n",
+	       plugin->p_num_devs, new_dev_idx);
+
+	// 2. Extend device array if needed (simple extension by 1)
+	nccl_net_ofi_device_t **new_devs = reinterpret_cast<nccl_net_ofi_device_t**>(std::realloc(
+		plugin->p_devs, (plugin->p_num_devs + 1) * sizeof(nccl_net_ofi_device_t*)));
+
+	if (!new_devs) {
+		NCCL_OFI_WARN("Failed to extend device array for virtual device");
+		return ncclInternalError;
+	}
+	plugin->p_devs = new_devs;
+	NCCL_OFI_INFO(NCCL_INIT, "makeVDevice step 2: Extended device array to %zu slots\n", plugin->p_num_devs + 1);
+
+	// 3. Extract and combine fi_info lists from source devices
+	struct fi_info *combined_info_list = extract_combined_rails(plugin, props);
+	if (!combined_info_list) {
+		NCCL_OFI_WARN("Failed to extract rails from source devices");
+		return ncclInternalError;
+	}
+	NCCL_OFI_INFO(NCCL_INIT, "makeVDevice step 3: Extract combined lists\n");
+
+	// 4. Cast to RDMA plugin to access topology
+	nccl_net_ofi_rdma_plugin_t *rdma_plugin = reinterpret_cast<nccl_net_ofi_rdma_plugin_t*>(plugin);
+	NCCL_OFI_INFO(NCCL_INIT, "makeVDevice step 4: Cast plugin to rdma plugin\n");
+
+	// 5. Create device using SAME function as topo.c uses!
+	nccl_net_ofi_rdma_device_t *virtual_device =
+		nccl_net_ofi_rdma_device_create(plugin, new_dev_idx, combined_info_list, rdma_plugin->topo);
+
+	if (!virtual_device) {
+		NCCL_OFI_WARN("Failed to create virtual device using standard device creation");
+		fi_freeinfo(combined_info_list);
+		return ncclInternalError;
+	}
+	NCCL_OFI_INFO(NCCL_INIT, "makeVDevice step 5: Successfully created virtual device with %d rails\n", virtual_device->num_rails);
+
+	// 5.1. Set source_dev_id for each rail based on the original device mapping
+	int rail_index = 0;
+	for (int i = 0; i < props->ndevs; ++i) {
+		auto* phys_dev = plugin->get_device(plugin, props->devs[i]);
+		auto* rdma_dev = reinterpret_cast<nccl_net_ofi_rdma_device_t*>(phys_dev);
+		
+		for (int rail = 0; rail < rdma_dev->num_rails; ++rail) {
+			virtual_device->device_rails[rail_index].source_dev_id = props->devs[i];
+			NCCL_OFI_INFO(NCCL_INIT, "makeVDevice: Rail %d came from physical device %d\n", 
+			             rail_index, props->devs[i]);
+			rail_index++;
+		}
+	}
+
+	// 6. Add to plugin device array
+	plugin->p_devs[new_dev_idx] = &virtual_device->base;
+	plugin->p_num_devs++;
+
+	*deviceIndex = new_dev_idx;
+	NCCL_OFI_INFO(NCCL_INIT,
+	       "makeVDevice step 6: Created virtual device %zu with %d rails from %d physical devices",
+	       new_dev_idx, virtual_device->num_rails, props->ndevs);
+	return ncclSuccess;
+}
+
 
 static inline int nccl_net_ofi_rdma_plugin_complete_init(nccl_net_ofi_plugin_t *plugin)
 {
@@ -7334,6 +7521,7 @@ static inline int nccl_net_ofi_rdma_plugin_create(size_t num_devices,
 
 	plugin->base.release_plugin = nccl_net_ofi_rdma_plugin_fini;
 	plugin->base.complete_init = nccl_net_ofi_rdma_plugin_complete_init;
+	plugin->base.makeVDevice = nccl_net_ofi_rdma_makevdevice_impl;
 
 	*plugin_p = plugin;
 
@@ -7468,6 +7656,7 @@ int nccl_net_ofi_rdma_init(const char *provider_filter,
 		goto error;
 	}
 
+	// TODO: Here there should be a choice of choosing between no merging, NCCL merging or plugin merging.
 	/* Create NCCL OFI topology */
 	topo = nccl_ofi_topo_create(provider_list);
 	if (!topo) {

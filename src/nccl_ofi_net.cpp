@@ -631,6 +631,11 @@ int nccl_net_ofi_info_properties(nccl_net_ofi_plugin_t *plugin, struct fi_info *
 		NCCL_OFI_TRACE(NCCL_INIT | NCCL_NET, "DMA-BUF support is advertised in properties.");
 	}
 
+	/* Initialize vProps for physical devices to indicate they represent themselves.
+	 * This is required by NCCL for proper topology processing. */
+	props->vProps.ndevs = 1;
+	props->vProps.devs[0] = dev_id;
+
 	goto exit;
 error:
 	if (props->pci_path) {
