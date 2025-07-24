@@ -27,6 +27,10 @@ noinst_PROGRAMS = \
 	dlopen_c_test \
 	param
 
+if ENABLE_INSTRUMENT_FUNCTIONS
+noinst_PROGRAMS += instrument_functions
+endif
+
 if WANT_PLATFORM_AWS
 noinst_PROGRAMS += aws_platform_mapper
 endif
@@ -54,6 +58,7 @@ histogram_binner_SOURCES = histogram_binner.cpp
 histogram_SOURCES = histogram.cpp
 dlopen_c_test_SOURCES = dlopen_c_test.c
 param_SOURCES = param.cpp
+instrument_functions_SOURCES = instrument_functions.cpp
 
 TESTS = $(noinst_PROGRAMS)
 endif

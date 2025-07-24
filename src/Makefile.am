@@ -35,6 +35,10 @@ sources = \
 	nccl_ofi_param.cpp \
 	tracepoint.cpp
 
+if ENABLE_INSTRUMENT_FUNCTIONS
+sources += nccl_ofi_instrument.cpp
+endif
+
 if WANT_PLATFORM_AWS
 sources += platform-aws.cpp
 endif

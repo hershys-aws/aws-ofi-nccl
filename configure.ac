@@ -69,6 +69,7 @@ AS_IF([test "${ax_enable_debug}" = "no"], [
              LDFLAGS="${LDFLAGS} -Bsymbolic"
             ])
 CHECK_ENABLE_SANITIZER()
+CHECK_ENABLE_INSTRUMENT_FUNCTIONS()
 
 
 # Checks for header files
