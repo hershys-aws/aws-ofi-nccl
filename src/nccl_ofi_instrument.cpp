@@ -7,6 +7,7 @@
 #ifdef ENABLE_INSTRUMENT_FUNCTIONS
 
 #include <cstdio>
+#include "nccl_ofi_log.h"
 
 extern "C" {
 
@@ -17,14 +18,16 @@ void __cyg_profile_func_exit(void *this_fn, void *call_site)
 
 // Function called on every function entry
 void __cyg_profile_func_enter(void *this_fn, void *call_site) {
+	if (!ofi_log_function) return;
     (void)call_site;  // Suppress unused parameter warning
-    printf("entering %p\n", this_fn);
+    NCCL_OFI_INFO(NCCL_ALL, "entering %p", this_fn);
 }
 
 // Function called on every function exit
 void __cyg_profile_func_exit(void *this_fn, void *call_site) {
+	if (!ofi_log_function) return;
     (void)call_site;  // Suppress unused parameter warning
-    printf("exiting %p\n", this_fn);
+    NCCL_OFI_INFO(NCCL_ALL, "exiting %p", this_fn);
 }
 
 }

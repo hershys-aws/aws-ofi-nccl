@@ -38,7 +38,8 @@ AC_DEFUN([CHECK_ENABLE_INSTRUMENT_FUNCTIONS],[
     AS_IF([test "${instrument_functions_enabled}" = "yes"], [
         AC_DEFINE([ENABLE_INSTRUMENT_FUNCTIONS], [1], [Define to 1 if function instrumentation is enabled])
         CXXFLAGS="${CXXFLAGS} -finstrument-functions"
-        AC_MSG_NOTICE([Function instrumentation enabled])
+        CXXFLAGS="${CXXFLAGS} -finstrument-functions-exclude-file-list=/usr/include/,/usr/lib/"
+        AC_MSG_NOTICE([Function instrumentation enabled (excluding standard library)])
     ])
 
     AM_CONDITIONAL([ENABLE_INSTRUMENT_FUNCTIONS], [test "${instrument_functions_enabled}" = "yes"])
