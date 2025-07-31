@@ -1045,8 +1045,6 @@ ncclResult_t nccl_net_ofi_makevdevice(int* deviceIndex, void* props)
 		NCCL_OFI_WARN("Plugin does not support virtual devices");
 		return check_return(ncclInvalidUsage);
 	}
-
-	/* Call the plugin's makeVDevice implementation - casting handled by caller */
 	ncclResult_t result = check_return(plugin->makeVDevice(plugin, deviceIndex, props));
 
 	if (result == ncclSuccess && deviceIndex) {

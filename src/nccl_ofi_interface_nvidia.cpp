@@ -344,41 +344,8 @@ static ncclResult_t nccl_net_ofi_accept_v9(void* listenComm, void** recvComm,
 
 static ncclResult_t nccl_net_ofi_makevdevice_v9(int* deviceIndex, ncclNetVDeviceProps_t* props)
 {
-	// Get platform-specific GPU to NIC ratio and deny merge if count doesn't match
-	int gpu_nic_ratio = 4;
-	if (const char* ratio_env = std::getenv("NCCL_NET_GPU_NIC_RATIO")) {
-		try {
-			gpu_nic_ratio = std::stoi(std::string(ratio_env));
-			if (gpu_nic_ratio <= 0 || gpu_nic_ratio > NCCL_NET_MAX_DEVS_PER_NIC) {
-				NCCL_OFI_WARN("Invalid NCCL_NET_GPU_NIC_RATIO=%s, using default=4", ratio_env);
-				gpu_nic_ratio = 4;
-			}
-		} catch (const std::exception&) {
-			NCCL_OFI_WARN("Invalid NCCL_NET_GPU_NIC_RATIO=%s (not a number), using default=4", ratio_env);
-			gpu_nic_ratio = 4;
-		}
-	}
-
-	// Deny merge unless device count exactly matches our platform ratio
-	if (props && props->ndevs != gpu_nic_ratio) {
-		NCCL_OFI_INFO(NCCL_INIT, "nccl_net_ofi_makevdevice: Denying merge of %d devices (platform requires exactly %d devices)", 
-		             props->ndevs, gpu_nic_ratio);
-		return ncclInvalidUsage;  // Deny the merge
-	}
-
-	// Log devices which are going to be merged (NCCL-specific logging)
-	if (props) {
-		std::string device_list;
-		for (int i = 0; i < props->ndevs; i++) {
-			if (i > 0) device_list += ", ";
-			device_list += std::to_string(props->devs[i]);
-		}
-		NCCL_OFI_INFO(NCCL_INIT, "nccl_net_ofi_makevdevice: Accepting merge of %d devices: [%s] (matches platform ratio=%d)", 
-		             props->ndevs, device_list.c_str(), gpu_nic_ratio);
-	}
-
 	// Cast to void* for the generic API - the plugin will receive void* and cast it back
-	return nccl_net_ofi_makevdevice(deviceIndex, static_cast<void*>(props));
+	return nccl_net_ofi_makevdevice(deviceIndex, props);
 }
 
 

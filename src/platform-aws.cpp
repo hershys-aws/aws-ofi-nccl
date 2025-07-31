@@ -132,7 +132,6 @@ static struct ec2_platform_data platform_data_map[] = {
 			{ "NCCL_NVLS_CHUNKSIZE", "524288" },
 			{ "NCCL_NET_FORCE_FLUSH", "0" },
 			{ "NCCL_NET_MERGE_LEVEL", "PIX" },
-			{ "NCCL_NET_GPU_NIC_RATIO", "2" },
 		},
 	},
 	{
@@ -162,7 +161,6 @@ static struct ec2_platform_data platform_data_map[] = {
 			{ "NCCL_NVLS_CHUNKSIZE", "524288" },
 			{ "NCCL_NET_FORCE_FLUSH", "0" },
 			{ "NCCL_NET_MERGE_LEVEL", "PIX" },
-			{ "NCCL_NET_GPU_NIC_RATIO", "4" },
 		},
 	},
 	{
