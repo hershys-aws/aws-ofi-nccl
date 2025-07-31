@@ -7372,39 +7372,19 @@ static fi_info* extract_combined_rails(nccl_net_ofi_plugin_t *plugin,
 
 static ncclResult_t nccl_net_ofi_rdma_makevdevice_impl(nccl_net_ofi_plugin_t *plugin,
 						       int *deviceIndex,
-						       ncclNetVDeviceProps_t *props)
+						       void *props)
 {
-	// 0. Get platform-specific GPU to NIC ratio and limit merging
-	int gpu_nic_ratio = 4;  // Default to 4 NICs per GPU
-	const char* ratio_env = getenv("NCCL_NET_GPU_NIC_RATIO");
-	if (ratio_env) {
-		gpu_nic_ratio = atoi(ratio_env);
-		if (gpu_nic_ratio <= 0 || gpu_nic_ratio > NCCL_NET_MAX_DEVS_PER_NIC) {
-			NCCL_OFI_WARN("Invalid NCCL_NET_GPU_NIC_RATIO=%s, using default=4", ratio_env);
-			gpu_nic_ratio = 4;
-		}
-	}
-	NCCL_OFI_INFO(NCCL_INIT, "makeVDevice Step 0: Using GPU to NIC ratio = %d\n", gpu_nic_ratio);
-
-	// 0.1. Limit the number of devices to merge based on platform ratio and API limits
-	int max_merge = std::min(gpu_nic_ratio, NCCL_NET_MAX_DEVS_PER_NIC);
-	int actual_merge = std::min(props->ndevs, max_merge);
-	
-	if (actual_merge < props->ndevs) {
-		NCCL_OFI_INFO(NCCL_INIT, "makeVDevice: Limiting merge from %d to %d devices (platform ratio=%d, API max=%d)\n", 
-		             props->ndevs, actual_merge, gpu_nic_ratio, NCCL_NET_MAX_DEVS_PER_NIC);
-		props->ndevs = actual_merge;
-	}
+	// Cast void* to ncclNetVDeviceProps_t* - RDMA plugin has NCCL knowledge
+	ncclNetVDeviceProps_t *vProps = static_cast<ncclNetVDeviceProps_t*>(props);
 
 	// 1. Find next available device index
 	size_t new_dev_idx = plugin->p_num_devs;
 	NCCL_OFI_INFO(NCCL_INIT, "makeVDevice Step 1: Current plugin has %zu devices, new virtual device will be index %zu\n",
-	       plugin->p_num_devs, new_dev_idx);
+	             plugin->p_num_devs, new_dev_idx);
 
-	// 2. Extend device array if needed (simple extension by 1)
-	nccl_net_ofi_device_t **new_devs = reinterpret_cast<nccl_net_ofi_device_t**>(std::realloc(
-		plugin->p_devs, (plugin->p_num_devs + 1) * sizeof(nccl_net_ofi_device_t*)));
-
+	// 2. Extend device array
+	nccl_net_ofi_device_t **new_devs = (nccl_net_ofi_device_t**)realloc(plugin->p_devs, 
+	                                                                    (plugin->p_num_devs + 1) * sizeof(nccl_net_ofi_device_t*));
 	if (!new_devs) {
 		NCCL_OFI_WARN("Failed to extend device array for virtual device");
 		return ncclInternalError;
@@ -7413,7 +7393,7 @@ static ncclResult_t nccl_net_ofi_rdma_makevdevice_impl(nccl_net_ofi_plugin_t *pl
 	NCCL_OFI_INFO(NCCL_INIT, "makeVDevice step 2: Extended device array to %zu slots\n", plugin->p_num_devs + 1);
 
 	// 3. Extract and combine fi_info lists from source devices
-	struct fi_info *combined_info_list = extract_combined_rails(plugin, props);
+	struct fi_info *combined_info_list = extract_combined_rails(plugin, vProps);
 	if (!combined_info_list) {
 		NCCL_OFI_WARN("Failed to extract rails from source devices");
 		return ncclInternalError;
@@ -7437,14 +7417,14 @@ static ncclResult_t nccl_net_ofi_rdma_makevdevice_impl(nccl_net_ofi_plugin_t *pl
 
 	// 5.1. Set source_dev_id for each rail based on the original device mapping
 	int rail_index = 0;
-	for (int i = 0; i < props->ndevs; ++i) {
-		auto* phys_dev = plugin->get_device(plugin, props->devs[i]);
+	for (int i = 0; i < vProps->ndevs; ++i) {
+		auto* phys_dev = plugin->get_device(plugin, vProps->devs[i]);
 		auto* rdma_dev = reinterpret_cast<nccl_net_ofi_rdma_device_t*>(phys_dev);
 		
 		for (int rail = 0; rail < rdma_dev->num_rails; ++rail) {
-			virtual_device->device_rails[rail_index].source_dev_id = props->devs[i];
+			virtual_device->device_rails[rail_index].source_dev_id = vProps->devs[i];
 			NCCL_OFI_INFO(NCCL_INIT, "makeVDevice: Rail %d came from physical device %d\n", 
-			             rail_index, props->devs[i]);
+			             rail_index, vProps->devs[i]);
 			rail_index++;
 		}
 	}
@@ -7456,7 +7436,7 @@ static ncclResult_t nccl_net_ofi_rdma_makevdevice_impl(nccl_net_ofi_plugin_t *pl
 	*deviceIndex = new_dev_idx;
 	NCCL_OFI_INFO(NCCL_INIT,
 	       "makeVDevice step 6: Created virtual device %zu with %d rails from %d physical devices",
-	       new_dev_idx, virtual_device->num_rails, props->ndevs);
+	       new_dev_idx, virtual_device->num_rails, vProps->ndevs);
 	return ncclSuccess;
 }
 

@@ -809,7 +809,7 @@ struct nccl_net_ofi_plugin {
 	 * Creates a virtual device that aggregates properties from
 	 * multiple physical devices. Returns the new device index.
 	 */
-	ncclResult_t (*makeVDevice)(nccl_net_ofi_plugin_t* plugin, int* deviceIndex, ncclNetVDeviceProps_t* props);
+	ncclResult_t (*makeVDevice)(nccl_net_ofi_plugin_t* plugin, int* deviceIndex, void* props);
 
 	/*
 	 * Determine whether to allocate the domain per process or per

@@ -1026,7 +1026,7 @@ ncclResult_t nccl_net_ofi_iread_v5(void* rComm, void* dest, size_t size, void* m
  * @return	0, on success
  *		error, on others
  */
-ncclResult_t nccl_net_ofi_makevdevice(int* deviceIndex, ncclNetVDeviceProps_t* props)
+ncclResult_t nccl_net_ofi_makevdevice(int* deviceIndex, void* props)
 {
 	/* Validate plugin */
 	if (OFI_UNLIKELY(plugin == NULL)) {
@@ -1040,24 +1040,13 @@ ncclResult_t nccl_net_ofi_makevdevice(int* deviceIndex, ncclNetVDeviceProps_t* p
 		return check_return(ncclInvalidArgument);
 	}
 
-	// Log devices which are going to be merged.
-	if (props) {
-		char device_list[256] = "";
-		for (int i = 0; i < props->ndevs; i++) {
-			char temp[32];
-			snprintf(temp, sizeof(temp), "%s%d", (i > 0) ? ", " : "", props->devs[i]);
-			strncat(device_list, temp, sizeof(device_list) - strlen(device_list) - 1);
-		}
-		NCCL_OFI_INFO(NCCL_INIT, "nccl_net_ofi_makevdevice: Request to merge %d devices: [%s]", props->ndevs, device_list);
-	}
-
 	/* Check if plugin supports makeVDevice */
 	if (OFI_UNLIKELY(plugin->makeVDevice == NULL)) {
 		NCCL_OFI_WARN("Plugin does not support virtual devices");
 		return check_return(ncclInvalidUsage);
 	}
 
-	/* Call the plugin's makeVDevice implementation */
+	/* Call the plugin's makeVDevice implementation - casting handled by caller */
 	ncclResult_t result = check_return(plugin->makeVDevice(plugin, deviceIndex, props));
 
 	if (result == ncclSuccess && deviceIndex) {
