@@ -7374,6 +7374,28 @@ static ncclResult_t nccl_net_ofi_rdma_makevdevice_impl(nccl_net_ofi_plugin_t *pl
 						       int *deviceIndex,
 						       ncclNetVDeviceProps_t *props)
 {
+	// 0. Get platform-specific GPU to NIC ratio and limit merging
+	int gpu_nic_ratio = 4;  // Default to 4 NICs per GPU
+	const char* ratio_env = getenv("NCCL_NET_GPU_NIC_RATIO");
+	if (ratio_env) {
+		gpu_nic_ratio = atoi(ratio_env);
+		if (gpu_nic_ratio <= 0 || gpu_nic_ratio > NCCL_NET_MAX_DEVS_PER_NIC) {
+			NCCL_OFI_WARN("Invalid NCCL_NET_GPU_NIC_RATIO=%s, using default=4", ratio_env);
+			gpu_nic_ratio = 4;
+		}
+	}
+	NCCL_OFI_INFO(NCCL_INIT, "makeVDevice Step 0: Using GPU to NIC ratio = %d\n", gpu_nic_ratio);
+
+	// 0.1. Limit the number of devices to merge based on platform ratio and API limits
+	int max_merge = std::min(gpu_nic_ratio, NCCL_NET_MAX_DEVS_PER_NIC);
+	int actual_merge = std::min(props->ndevs, max_merge);
+	
+	if (actual_merge < props->ndevs) {
+		NCCL_OFI_INFO(NCCL_INIT, "makeVDevice: Limiting merge from %d to %d devices (platform ratio=%d, API max=%d)\n", 
+		             props->ndevs, actual_merge, gpu_nic_ratio, NCCL_NET_MAX_DEVS_PER_NIC);
+		props->ndevs = actual_merge;
+	}
+
 	// 1. Find next available device index
 	size_t new_dev_idx = plugin->p_num_devs;
 	NCCL_OFI_INFO(NCCL_INIT, "makeVDevice Step 1: Current plugin has %zu devices, new virtual device will be index %zu\n",
