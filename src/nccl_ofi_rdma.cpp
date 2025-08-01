@@ -330,24 +330,24 @@ static void log_device_properties(nccl_net_ofi_plugin_t* plugin,
 				  const ncclNetVDeviceProps_t* vProps,
 				  const nccl_net_ofi_rdma_device_t* virtual_device) {
 	std::ostringstream oss;
-	// oss << "Device Merge Configuration:\n"
-	// 	<< "Source Devices (" << vProps->ndevs << "):\n";
-	//
-	// // Log properties of all source devices
-	// for (int i = 0; i < vProps->ndevs; ++i) {
-	// 	auto* phys_dev = reinterpret_cast<nccl_net_ofi_rdma_device_t*>(
-	// 		plugin->get_device(plugin, vProps->devs[i]));
-	//
-	// 	oss << "Physical Device " << vProps->devs[i] << ":\n"
-	// 		<< format_rdma_device(phys_dev) << "\n";
-	// }
+	oss << "Device Merge Configuration:\n"
+		<< "Source Devices (" << vProps->ndevs << "):\n";
+
+	// Log properties of all source devices
+	for (int i = 0; i < vProps->ndevs; ++i) {
+		auto* phys_dev = reinterpret_cast<nccl_net_ofi_rdma_device_t*>(
+			plugin->get_device(plugin, vProps->devs[i]));
+
+		oss << "Physical Device " << vProps->devs[i] << ":\n"
+			<< format_rdma_device(phys_dev) << "\n";
+	}
 
 	// Log the resulting virtual device
 	oss << "\nResulting Virtual Device:\n"
 		<< format_rdma_device(virtual_device);
 
 	// Log everything in one call
-	NCCL_OFI_INFO(NCCL_INIT, "%s", oss.str().c_str());
+	NCCL_OFI_INFO(NCCL_GRAPH, "%s", oss.str().c_str());
 }
 
 
@@ -563,6 +563,7 @@ static inline int get_properties(nccl_net_ofi_device_t *base_dev,
 	 * reails have the same speed. */
 	if (ret == 0) {
 		props->port_speed *= device->num_rails;
+		NCCL_OFI_INFO(NCCL_GRAPH, "Num Rails %d Port Number: %d Port Speed: %d", device->num_rails, props->port_number, props->port_speed);
 		static_assert(NCCL_OFI_RDMA_COMM_ID_BITS < 31,
 					  "NCCL_OFI_RDMA_COMM_ID_BITS must be less than 31 so max_communicators fits in an integer");
 		props->max_communicators = NCCL_OFI_RDMA_MAX_COMMS;
@@ -598,7 +599,7 @@ static inline int get_properties(nccl_net_ofi_device_t *base_dev,
 		props->vProps.devs[i] = unique_devs[i];
 	}
 
-	/* 
+	/*
 	 * Actual max tansfer size is the min size between the interface and
 	 * libfabric's data transfer layer
 	 * 
