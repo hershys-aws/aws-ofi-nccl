@@ -551,6 +551,9 @@ static inline int get_properties(nccl_net_ofi_device_t *base_dev,
 	nccl_net_ofi_rdma_plugin_t *plugin = rdma_device_get_plugin(device);
 	int dev_id = device->base.dev_id;
 	int ret;
+	
+	NCCL_OFI_INFO(NCCL_GRAPH, "GET_PROPERTIES_DEBUG: Called for dev_id=%d, num_rails=%d", 
+	               dev_id, device->num_rails);
 
 	/* Retrieve NIC properties of first rail */
 	struct fi_info *info = device->device_rails[0].info;
@@ -563,7 +566,8 @@ static inline int get_properties(nccl_net_ofi_device_t *base_dev,
 	 * reails have the same speed. */
 	if (ret == 0) {
 		props->port_speed *= device->num_rails;
-		NCCL_OFI_INFO(NCCL_GRAPH, "Num Rails %d Port Number: %d Port Speed: %d", device->num_rails, props->port_number, props->port_speed);
+		NCCL_OFI_INFO(NCCL_NET, "GET_PROPERTIES_DEBUG: dev_id=%d, final port_speed=%d (num_rails=%d)",
+		               dev_id, props->port_speed, device->num_rails);
 		static_assert(NCCL_OFI_RDMA_COMM_ID_BITS < 31,
 					  "NCCL_OFI_RDMA_COMM_ID_BITS must be less than 31 so max_communicators fits in an integer");
 		props->max_communicators = NCCL_OFI_RDMA_MAX_COMMS;

@@ -25,6 +25,8 @@ static ncclResult_t getProperties_v10(int dev_id, ncclNetProperties_v10_t* props
 	if (ret != ncclSuccess) {
 		return ret;
 	}
+	
+	NCCL_OFI_INFO(NCCL_GRAPH, "INTERFACE_DEBUG: getProperties_v10 called with dev_id=%d", dev_id);
 
 	props->name = ofi_properties.name;
 	props->pciPath = ofi_properties.pci_path;
@@ -59,6 +61,7 @@ static ncclResult_t getProperties_v10(int dev_id, ncclNetProperties_v10_t* props
 	props->regIsGlobal = ofi_properties.regIsGlobal;
 
 	props->speed = ofi_properties.port_speed;
+	NCCL_OFI_INFO(NCCL_GRAPH, "INTERFACE_DEBUG: getProperties_v10 dev_id=%d returning speed=%d to NCCL", dev_id, props->speed);
 	props->port = ofi_properties.port_number;
 	props->latency = ofi_properties.latency;
 	props->maxComms = ofi_properties.max_communicators;
