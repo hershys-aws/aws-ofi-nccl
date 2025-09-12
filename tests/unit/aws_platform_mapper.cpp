@@ -8,6 +8,7 @@
 #include "test-logger.h"
 #include <stdio.h>
 #include <string.h>
+#include <cstdlib>
 
 #include "platform-aws.h"
 
@@ -17,6 +18,7 @@ public:
 	using PlatformAWS::get_platform_map;
 	using PlatformAWS::get_platform_entry;
 	using PlatformAWS::ec2_platform_data;
+	using PlatformAWS::is_aws;
 };
 
 /* check that we get the expected response for all our known platforms */
@@ -113,6 +115,17 @@ int main(int argc, char *argv[]) {
 	/* make sure we maintain ordering */
 	ret += check_value(test_map_1, 2, "platform-x", "first");
 	ret += check_value(test_map_1, 2, "platform-xy", "second");
+
+	/* test FORCE_NON_AWS parameter */
+	printf("Testing OFI_NCCL_FORCE_NON_AWS parameter:\n");
+
+	// Test current environment setting
+	TestablePlatformAWS test_platform;
+	printf("  Current environment - is_aws(): %s, priority: %d\n",
+	       test_platform.is_aws() ? "true" : "false",
+	       test_platform.get_priority());
+
+	printf("  Note: Parameter effect visible only on compute nodes with EFA devices\n");
 
 	return ret;
 }
