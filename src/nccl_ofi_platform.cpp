@@ -3,24 +3,19 @@
  */
 
 #include "nccl_ofi_platform.h"
+#ifdef WANT_AWS_PLATFORM
+#include "platform-aws.h"
+#endif
+
+PlatformManager::PlatformManager()
+: override_(ofi_nccl_platform_override.get()) {
+	register_platform(std::make_unique<Default>());
+#ifdef WANT_AWS_PLATFORM
+	register_platform(std::make_unique<PlatformAWS>());
+#endif
+}
 
 PlatformManager& PlatformManager::get_global() {
 	static PlatformManager manager;
 	return manager;
-}
-
-void PlatformManager::register_platform(PlatformPtr&& platform) {
-	int priority = platform->get_priority();
-	const char* name = platform->get_name();
-
-	auto it = platforms_.find(priority);
-	if (it != platforms_.end()) {
-		if (strcmp(it->second->get_name(), name) == 0) {
-			return;
-		}
-		// TODO: Add proper resolution mechanism for competing priorities
-		priority++;
-	}
-
-	platforms_[priority] = std::move(platform);
 }

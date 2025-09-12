@@ -6934,10 +6934,8 @@ static void get_hints(struct fi_info *hints)
 
 nccl_net_ofi_rdma_plugin_t::~nccl_net_ofi_rdma_plugin_t()
 {
-	if (this->topo != nullptr) {
-		nccl_ofi_topo_free(this->topo);
-		this->topo = nullptr;
-	}
+	// TODO: Refactor so plugin holds reference to TopoploguManager object
+	this->topo = nullptr;
 
 	if (r_comm_cleanup_list != nullptr) {
 		delete r_comm_cleanup_list;
@@ -7013,17 +7011,11 @@ nccl_net_ofi_rdma_plugin_t::nccl_net_ofi_rdma_plugin_t(struct fi_info *provider_
 	int ret = 0;
 	int num_devices = 0;
 
-	/* Create NCCL OFI topology */
-	this->topo = nccl_ofi_topo_create(provider_list);
+	/* Use shared NCCL OFI topology */
+	this->topo = TopologyManager::get();
 	if (!this->topo) {
-		NCCL_OFI_WARN("Failed to create NCCL OFI topology");
-		throw std::runtime_error("rdma plugin constructor: topo creation failed");
-	}
-
-	ret = nccl_ofi_topo_group(this->topo);
-	if (ret != 0) {
-		NCCL_OFI_WARN("Failed to group NICs");
-		throw std::runtime_error("rdma plugin constructor: NIC grouping failed");
+		NCCL_OFI_WARN("Failed to get NCCL OFI topology");
+		throw std::runtime_error("rdma plugin constructor: topo access failed");
 	}
 
 	if (this->topo->max_group_size < 1 || this->topo->max_group_size > MAX_NUM_RAILS) {
@@ -7091,6 +7083,10 @@ int nccl_net_ofi_rdma_init(const char *provider_filter,
 			       FI_MAJOR(api_version),
 			       FI_MINOR(api_version),
 			       FI_VERSION_GE(api_version, FI_VERSION(1, 20)) ? "DMA-BUF" : "GPUDirect RDMA");
+
+		/* Initialize topology manager with provider list */
+		TopologyManager::initialize(provider_list);
+
 		/* The 1.18 API allows providers to use CUDA to
 		 * support HMEM pointers, so just having HMEM doesn't
 		 * tell us anything about the usability of CUDA

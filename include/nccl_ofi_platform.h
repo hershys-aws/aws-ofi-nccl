@@ -7,10 +7,12 @@
 
 #include <memory>
 #include <map>
+#include <limits>
 
 #include <rdma/fabric.h>
 #include <rdma/fi_endpoint.h>
 
+#include "nccl_ofi_param.h"
 #include "nccl_ofi_system.h"
 
 /**
@@ -136,30 +138,18 @@ public:
 	static PlatformManager& get_global();
 
 	/**
-	 * @brief	Register a platform with the manager
-	 *
-	 * 		Platforms are automatically sorted by priority in the internal map.
-	 * 		Higher priority values take precedence and duplicates are dropped.
-	 *
-	 * @param	platform	Platform instance to register (moved)
-	 */
-	void register_platform(PlatformPtr&& platform);
-
-	/**
 	 * @brief	Get the highest priority platform instance
 	 *
 	 * 		Returns the platform with the highest priority value.
 	 *
 	 * @return	Reference to highest priority platform
 	 */
-	inline Platform& get_platform() { return *platforms_.rbegin()->second; }
+	inline Platform& get_platform() {
+		NCCL_OFI_INFO(NCCL_INIT | NCCL_NET, "Selected platform: %s",
+		              platform_->get_name());
+		return *platform_;
+	}
 
-	/**
-	 * @brief	Get number of registered platforms (for testing)
-	 *
-	 * @return	Number of platforms in the manager
-	 */
-	inline size_t get_platform_count() { return platforms_.size(); }
 protected:
 	/**
 	 * @brief	Default constructor
@@ -167,12 +157,37 @@ protected:
 	 *		instance is meant to be used in the plugin and the unit
 	 *		tests leverage the protected scope.
 	 */
-	PlatformManager() {
-		register_platform(std::make_unique<Default>());
+	PlatformManager();
+
+	/**
+	 * @brief	Register a platform with the manager
+	 *
+	 * 		Platforms are selected by priority. Higher priority values take
+	 * 		precedence. This can only be done in the constructor as all platforms
+	 * 		must be added during object creation to allow the tuner and plugin
+	 * 		to operate consistently.
+	 *
+	 * @param	platform	Platform instance to register (moved)
+	 */
+	void register_platform(PlatformPtr&& platform) {
+		int priority = platform->get_priority();
+		// Replace if no current platform or higher priority
+		if (!platform_ || priority > current_priority_) {
+			platform_ = std::move(platform);
+			current_priority_ = priority;
+
+			// Set max priority if this matches the override so no other platform can override
+			if (!override_.empty() && override_ == platform_->get_name()) {
+				current_priority_ = std::numeric_limits<int>::max();
+			}
+		}
 	}
 
+
 private:
-	std::map<int, PlatformPtr> platforms_;
+	std::string override_ = "";
+	int current_priority_ = -1;
+	PlatformPtr platform_ = nullptr;
 };
 
 

@@ -23,7 +23,7 @@
 class PlatformAWS : public Platform {
 public:
 	const char* get_name() const override { return "AWS"; }
-	int get_priority() override { return 100; }
+	int get_priority() override { return TopologyManager::has_efa_ena_devices() ? 100 : -1; }
 	int init(const char **provider_filter) override;
 	int config_endpoint(struct fi_info *info, struct fid_ep *ep) override;
 	void sort_rails(struct fi_info **info_list, size_t num_rails, size_t num_groups) override;
