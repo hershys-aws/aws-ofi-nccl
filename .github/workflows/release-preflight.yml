@@ -1,0 +1,76 @@
+name: Release Preflight Setup
+
+on:
+  workflow_dispatch:
+    inputs:
+      major:
+        description: 'Major version (e.g., 1)'
+        required: true
+        type: string
+      minor:
+        description: 'Minor version (e.g., 17)'
+        required: true
+        type: string
+      patch:
+        description: 'Patch version (e.g., 0)'
+        required: true
+        type: string
+      aws_only:
+        description: 'AWS-only release'
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  branch-setup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create release branch
+        run: |
+          MAJOR="${{ inputs.major }}"
+          MINOR="${{ inputs.minor }}"
+          PATCH="${{ inputs.patch }}"
+          AWS_SUFFIX="${{ inputs.aws_only == true && '-aws' || '' }}"
+          VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          BRANCH="v${MAJOR}.${MINOR}.x${AWS_SUFFIX}"
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout master -b $BRANCH
+          git push origin HEAD:$BRANCH
+
+  update-branch-version-pr:
+    needs: branch-setup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create PR to update to alpha version
+        run: |
+          MAJOR="${{ inputs.major }}"
+          MINOR="${{ inputs.minor }}"
+          PATCH="${{ inputs.patch }}"
+          AWS_SUFFIX="${{ inputs.aws_only == true && '-aws' || '' }}"
+          VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          BRANCH="v${MAJOR}.${MINOR}.x${AWS_SUFFIX}"
+          ALPHA_VERSION="${VERSION}${AWS_SUFFIX}a1"
+          
+          git checkout $BRANCH
+          sed -i "s/AC_INIT(\[aws-ofi-nccl\], \[GitHub-dev\]/AC_INIT([aws-ofi-nccl], [$ALPHA_VERSION]/" configure.ac
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b auto/update-alpha-$ALPHA_VERSION
+          git add configure.ac
+          git commit -m "Update version to $ALPHA_VERSION"
+          git push origin auto/update-alpha-$ALPHA_VERSION
+          
+          gh pr create --title "Update version to $ALPHA_VERSION" \
+            --body "Update release branch version from GitHub-dev to $ALPHA_VERSION" \
+            --base $BRANCH --head auto/update-alpha-$ALPHA_VERSION
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

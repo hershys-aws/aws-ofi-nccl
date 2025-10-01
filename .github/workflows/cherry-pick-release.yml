@@ -1,0 +1,53 @@
+name: Cherry-pick for Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: 'Target release branch (e.g., v1.16.x)'
+        required: true
+        type: string
+      commits:
+        description: 'Comma-separated commit hashes to cherry-pick'
+        required: true
+        type: string
+
+jobs:
+  cherry-pick:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Cherry-pick commits and create PR
+        run: |
+          TARGET_BRANCH="${{ inputs.target_branch }}"
+          COMMITS="${{ inputs.commits }}"
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git checkout $TARGET_BRANCH
+          
+          # Create branch for cherry-picks
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          CHERRY_BRANCH="auto/cherry-pick-$TIMESTAMP"
+          git checkout -b $CHERRY_BRANCH
+          
+          # Cherry-pick each commit with -x flag
+          IFS=',' read -ra COMMIT_ARRAY <<< "$COMMITS"
+          for commit in "${COMMIT_ARRAY[@]}"; do
+            commit=$(echo $commit | xargs)  # trim whitespace
+            git cherry-pick -x $commit
+          done
+          
+          git push origin $CHERRY_BRANCH
+          
+          # Create PR
+          COMMIT_LIST=$(echo "$COMMITS" | tr ',' '\n' | sed 's/^/- /' | tr '\n' ' ')
+          gh pr create --title "Cherry-pick commits for $TARGET_BRANCH release" \
+            --body "Cherry-picked commits: $COMMIT_LIST" \
+            --base $TARGET_BRANCH --head $CHERRY_BRANCH
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

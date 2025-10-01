@@ -1,0 +1,60 @@
+name: Final Release Commit
+
+on:
+  workflow_dispatch:
+    inputs:
+      major:
+        description: 'Major version (e.g., 1)'
+        required: true
+        type: string
+      minor:
+        description: 'Minor version (e.g., 16)'
+        required: true
+        type: string
+      patch:
+        description: 'Patch version (e.g., 3)'
+        required: true
+        type: string
+      aws_only:
+        description: 'AWS-only release'
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  create-final-release-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create final release PR
+        run: |
+          MAJOR="${{ inputs.major }}"
+          MINOR="${{ inputs.minor }}"
+          PATCH="${{ inputs.patch }}"
+          AWS_SUFFIX="${{ inputs.aws_only == true && '-aws' || '' }}"
+          VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          BRANCH="v${MAJOR}.${MINOR}.x${AWS_SUFFIX}"
+          FULL_VERSION="${VERSION}${AWS_SUFFIX}"
+          
+          git checkout $BRANCH
+          
+          # Update version in configure.ac
+          sed -i "s/AC_INIT(\[aws-ofi-nccl\], \[.*\]/AC_INIT([aws-ofi-nccl], [$FULL_VERSION]/" configure.ac
+          
+          # Update RELEASENOTES.md
+          DATE=$(date +"%Y-%m-%d")
+          sed -i "1i# v$FULL_VERSION ($DATE)\n\n* Release v$FULL_VERSION\n" RELEASENOTES.md
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b auto/release-$FULL_VERSION
+          git add configure.ac RELEASENOTES.md
+          git commit -S -m "Release v$FULL_VERSION" || git commit -m "Release v$FULL_VERSION"
+          git push origin auto/release-$FULL_VERSION
+          
+          gh pr create --title "Update version number and changelog for v$FULL_VERSION release" \
+            --body "Final release preparation for v$FULL_VERSION" \
+            --base $BRANCH --head auto/release-$FULL_VERSION --draft
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

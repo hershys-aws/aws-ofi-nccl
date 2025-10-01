@@ -111,3 +111,35 @@ jobs:
             libnccl-ofi-*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bump version and create PR
+        run: |
+          VERSION=$(echo ${{ github.ref_name }} | sed 's/^v//' | sed 's/-aws$//')
+          MAJOR=$(echo $VERSION | cut -d. -f1)
+          MINOR=$(echo $VERSION | cut -d. -f2)
+          PATCH=$(echo $VERSION | cut -d. -f3)
+          NEXT_PATCH=$((PATCH + 1))
+          NEXT_VERSION="${MAJOR}.${MINOR}.${NEXT_PATCH}a1"
+          
+          # Branch name is v{MAJOR}.{MINOR}.x (current pattern for recent releases)
+          BRANCH="v${MAJOR}.${MINOR}.x"
+          
+          git checkout $BRANCH
+          sed -i "s/AC_INIT(\[aws-ofi-nccl\], \[$VERSION\]/AC_INIT([aws-ofi-nccl], [$NEXT_VERSION]/" configure.ac
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b auto/bump-version-$NEXT_VERSION
+          git add configure.ac
+          git commit -m "Bump version to $NEXT_VERSION"
+          git push origin auto/bump-version-$NEXT_VERSION
+          
+          gh pr create --title "Bump version to $NEXT_VERSION" \
+            --body "Automated version bump after release ${{ github.ref_name }}" \
+            --base $BRANCH --head auto/bump-version-$NEXT_VERSION
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
