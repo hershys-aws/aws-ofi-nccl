@@ -33,11 +33,16 @@ CXXLINK = OMPI_CXX="$(CXX)" MPICH_CXX="$(CXX)" \
 if ENABLE_FUNC_TESTS
 noinst_HEADERS = test-common.h
 
-bin_PROGRAMS = nccl_connection nccl_message_transfer ring inflight_close reuse_listen_comm
+bin_PROGRAMS = nccl_connection nccl_message_transfer ring inflight_close reuse_listen_comm \
+	multi_comm_domain comm_abort_scenarios resource_cleanup stress_scale
 
 nccl_connection_SOURCES = nccl_connection.cpp
 nccl_message_transfer_SOURCES = nccl_message_transfer.cpp
 ring_SOURCES = ring.cpp
 inflight_close_SOURCES = inflight_close.cpp
 reuse_listen_comm_SOURCES = reuse_listen_comm.cpp
+multi_comm_domain_SOURCES = multi_comm_domain.cpp
+comm_abort_scenarios_SOURCES = comm_abort_scenarios.cpp
+resource_cleanup_SOURCES = resource_cleanup.cpp
+stress_scale_SOURCES = stress_scale.cpp
 endif

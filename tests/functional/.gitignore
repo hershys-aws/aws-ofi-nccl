@@ -3,3 +3,7 @@ nccl_connection
 nccl_message_transfer
 reuse_listen_comm
 ring
+multi_comm_domain
+comm_abort_scenarios
+resource_cleanup
+stress_scale
