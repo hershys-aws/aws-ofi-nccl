@@ -305,7 +305,7 @@ exit:
  * @return	Populated I/O vector, on success
  * @return	0 on success
  *		non-zero on error
- */ 
+ */
 static int set_mr_req_attr(uint64_t mr_key,
 			   nccl_ofi_mr_ckey_ref ckey, uint64_t *flags,
 			   int type, struct fi_mr_attr *mr_attr)
@@ -313,7 +313,7 @@ static int set_mr_req_attr(uint64_t mr_key,
 	int ret = 0;
 	mr_attr->access = FI_SEND | FI_RECV;
 
-	/* Add FI_WRITE (source of fi_write) and FI_REMOTE_WRITE (target of fi_write) 
+	/* Add FI_WRITE (source of fi_write) and FI_REMOTE_WRITE (target of fi_write)
 	   for RDMA send/recv buffers */
 	mr_attr->access |= (FI_WRITE | FI_REMOTE_WRITE);
 	/* Add FI_READ (destination buffer for RMA read) and FI_REMOTE_READ
@@ -406,10 +406,10 @@ int nccl_net_ofi_rdma_device_t::get_properties(nccl_ofi_properties_t *props)
 	assert(is_max_write_inline_size_initialized);
 	props->max_write_inline_size = max_write_inline_size;
 
-	/* 
+	/*
 	 * Actual max tansfer size is the min size between the interface and
 	 * libfabric's data transfer layer
-	 * 
+	 *
 	 * ext-net v9 API interfaces updated the sizes to size_t type. But sizes in
 	 * the actual plugin implementations are using int type, thus the max
 	 * max for interface is INT_MAX
@@ -656,7 +656,7 @@ static inline int inc_recv_seg_completion(nccl_net_ofi_rdma_req_t *req,
 	assert(req->type == NCCL_OFI_RDMA_RECV_SEGMS);
 	int ret = 0;
 	bool segms_received;
-	
+
 	nccl_net_ofi_mutex_lock(&req->req_lock);
 
 	/* Sum up segment sizes */
@@ -667,7 +667,7 @@ static inline int inc_recv_seg_completion(nccl_net_ofi_rdma_req_t *req,
 	/* The arrival of the last segment is treated as a single
 	 * request completion of the parent request */
 	segms_received = req->ncompls == total_nsegms;
-	
+
 	/* Mark receive segments request and receive request as completed */
 	if (segms_received) {
 		rdma_req_recv_segms_data_t *recv_segms_data = get_recv_segms_data(req);
@@ -682,7 +682,7 @@ static inline int inc_recv_seg_completion(nccl_net_ofi_rdma_req_t *req,
 		 * unlocking receive segment request after it has been
 		 * freed in `test()` */
 		nccl_net_ofi_mutex_unlock(&req->req_lock);
-		
+
 		/* Add completion to parent request */
 		ret = inc_req_completion(recv_req, req->size, recv_data->total_num_compls);
 	} else {
@@ -1013,7 +1013,7 @@ exit:
 
 /**
  * @brief	Get request associated with RDMA write immediate data
- * 
+ *
  * @param	ep, to look up r_comm from ID encoded in data
  * @param	data, the immediate data
  */
@@ -1732,7 +1732,7 @@ static inline int free_base_req(uint64_t *num_inflight_reqs,
 {
 	int ret = 0;
 	nccl_ofi_freelist_elem_t *elem = NULL;
-	
+
 	if (OFI_UNLIKELY(req == NULL)) {
 		ret = -EINVAL;
 		NCCL_OFI_WARN("Provided null request for cleanup");
@@ -3238,35 +3238,55 @@ int nccl_net_ofi_rdma_domain_t::alloc_and_reg_flush_buff(int dev_id)
 	int rc;
 	nccl_net_ofi_rdma_mr_handle_t *mr_handle = NULL;
 
+	NCCL_OFI_INFO(NCCL_NET, "DEBUG: alloc_and_reg_flush_buff called for dev_id %d", dev_id);
+	NCCL_OFI_INFO(NCCL_NET, "DEBUG: HAVE_NEURON=%d, HAVE_CUDA=%d", HAVE_NEURON, HAVE_CUDA);
+	NCCL_OFI_INFO(NCCL_NET, "DEBUG: ofi_nccl_gdr_flush_disable()=%d", ofi_nccl_gdr_flush_disable());
+
+	// Check if flush buffers are disabled - if so, skip allocation entirely
+	if (ofi_nccl_gdr_flush_disable()) {
+		NCCL_OFI_INFO(NCCL_NET, "DEBUG: GDR flush disabled, skipping flush buffer allocation");
+		this->flush_buff.buffer = MAP_FAILED;
+		this->flush_buff.buffer_base = nullptr;
+		this->flush_buff.size = 0;
+		this->flush_buff.mr_handle = nullptr;
+		return 0;
+	}
+
 #if HAVE_NEURON
+	NCCL_OFI_INFO(NCCL_NET, "DEBUG: Entering HAVE_NEURON section for flush buffer allocation");
 	NCCL_OFI_TRACE(NCCL_NET, "Registering buffer for flush operations");
 
 	this->flush_buff.size = NCCL_OFI_FLUSH_SIZE;
 	assert(NCCL_OFI_FLUSH_SIZE <= system_page_size);
+	NCCL_OFI_INFO(NCCL_NET, "DEBUG: Allocating NEURON flush buffer of size %zu", this->flush_buff.size);
 	ret = nccl_net_ofi_alloc_mr_buffer(system_page_size, &(this->flush_buff.buffer));
 	if (OFI_UNLIKELY(ret != 0)) {
-		NCCL_OFI_WARN("Unable to allocate flush buffer (%d)", ret);
+		NCCL_OFI_WARN("DEBUG: Unable to allocate NEURON flush buffer (%d)", ret);
 		return ret;
 	}
 
 	/* make sure flush destination address does not overflow beyond host buffer */
 	assert(((NCCL_OFI_DEFAULT_CPU_CACHE_LINE_SIZE * this->num_rails) + this->flush_buff.size) <= system_page_size);
 
+	NCCL_OFI_INFO(NCCL_NET, "DEBUG: Registering NEURON flush buffer as host memory");
 	ret = this->reg_internal_mr(this->flush_buff.buffer, system_page_size,
 				NCCL_PTR_HOST, &mr_handle);
 	if (OFI_UNLIKELY(ret != 0)) {
-		NCCL_OFI_WARN("Could not register dummy buffer for flush, dev: %d",
-                             dev_id);
+		NCCL_OFI_WARN("DEBUG: Could not register NEURON dummy buffer for flush, dev: %d, ret: %d",
+                             dev_id, ret);
 		rc = nccl_net_ofi_dealloc_mr_buffer(this->flush_buff.buffer,
 						system_page_size);
 		if (rc != 0) {
-			NCCL_OFI_WARN("Unable to deallocate flush buffer (%d)", rc);
+			NCCL_OFI_WARN("DEBUG: Unable to deallocate NEURON flush buffer (%d)", rc);
 		}
 		this->flush_buff.buffer = MAP_FAILED;
+	} else {
+		NCCL_OFI_INFO(NCCL_NET, "DEBUG: Successfully registered NEURON flush buffer");
 	}
 #endif
 
 #if HAVE_CUDA
+	NCCL_OFI_INFO(NCCL_NET, "DEBUG: Entering HAVE_CUDA section for flush buffer allocation");
 	NCCL_OFI_TRACE(NCCL_NET, "Registering buffer in GPU for flush operations");
 
 	/*
@@ -3276,9 +3296,10 @@ int nccl_net_ofi_rdma_domain_t::alloc_and_reg_flush_buff(int dev_id)
 	* memory registrations on it.
 	*/
 	this->flush_buff.size = 2 * system_page_size;
+	NCCL_OFI_INFO(NCCL_NET, "DEBUG: Attempting CUDA memory allocation of size %zu", this->flush_buff.size);
 	ret = nccl_net_ofi_cuda_mem_alloc(&(this->flush_buff.buffer_base), this->flush_buff.size);
 	if (OFI_UNLIKELY(ret != 0)) {
-		NCCL_OFI_WARN("Unable to allocate flush buffer (%d)", ret);
+		NCCL_OFI_WARN("DEBUG: Unable to allocate flush buffer (%d)", ret);
 		return ret;
 	}
 
@@ -3288,10 +3309,21 @@ int nccl_net_ofi_rdma_domain_t::alloc_and_reg_flush_buff(int dev_id)
 	this->flush_buff.buffer = (void *)NCCL_OFI_ROUND_UP((uintptr_t)this->flush_buff.buffer_base, system_page_size);
 
 	/* Copy flush sentinel value into aligned ptr of gpu buffer */
+	NCCL_OFI_INFO(NCCL_NET, "DEBUG: Attempting to copy sentinel value to GPU flush buffer");
+	NCCL_OFI_INFO(NCCL_NET, "DEBUG: flush_buff.buffer=%p, flush_sentinel=%p, size=%llu",
+		this->flush_buff.buffer, flush_sentinel, NCCL_OFI_DEFAULT_CPU_CACHE_LINE_SIZE);
+	NCCL_OFI_INFO(NCCL_NET, "DEBUG: flush_sentinel_size=%zd, flush_sentinel[0]=0x%lx",
+		flush_sentinel_size, flush_sentinel ? flush_sentinel[0] : 0);
+	NCCL_OFI_INFO(NCCL_NET, "DEBUG: buffer_base=%p, aligned_buffer=%p, alignment_offset=%ld",
+		this->flush_buff.buffer_base, this->flush_buff.buffer,
+		(char*)this->flush_buff.buffer - (char*)this->flush_buff.buffer_base);
+
 	ret =  nccl_net_ofi_cuda_mem_copy_host_to_device(this->flush_buff.buffer, flush_sentinel,
 							NCCL_OFI_DEFAULT_CPU_CACHE_LINE_SIZE);
 	if (OFI_UNLIKELY(ret != 0)) {
-		NCCL_OFI_WARN("Unable to copy sentinel value to gpu flush buffer (%d)", ret);
+		NCCL_OFI_WARN("DEBUG: Unable to copy sentinel value to gpu flush buffer (%d)", ret);
+		NCCL_OFI_WARN("DEBUG: CUDA memcpy failed - src=%p, dst=%p, size=%llu, ret=%d",
+			flush_sentinel, this->flush_buff.buffer, NCCL_OFI_DEFAULT_CPU_CACHE_LINE_SIZE, ret);
 		return ret;
 	}
 
@@ -3300,45 +3332,53 @@ int nccl_net_ofi_rdma_domain_t::alloc_and_reg_flush_buff(int dev_id)
         * If dma buf is viable and supported then register flush dummy buffer
         * using dma buf for provider access
         */
+	NCCL_OFI_INFO(NCCL_NET, "DEBUG: Checking DMA BUF support for flush buffer registration");
 	nccl_net_ofi_rdma_device_t *dev = this->rdma_domain_get_device();
 	struct fi_info *nic_prov = dev->get_ofi_info_for_cm();
 
 	if (nccl_ofi_dmabuf_viable_and_supported(nic_prov)) {
+		NCCL_OFI_INFO(NCCL_NET, "DEBUG: DMA BUF is viable and supported, using DMA BUF registration");
 		size_t offset = 0;
 		int fd;
 
 		/*
 		* Retrieve the fd and offset and the aligned ptr used for dma buf
 		*/
+		NCCL_OFI_INFO(NCCL_NET, "DEBUG: Getting DMA BUF fd for flush buffer");
 		ret = nccl_net_ofi_cuda_get_dma_buf_fd(this->flush_buff.buffer, system_page_size, &fd, &offset);
 		if (OFI_UNLIKELY(ret != 0)) {
-			NCCL_OFI_WARN("Unable to retrieve flush buffer fd (%d)", ret);
+			NCCL_OFI_WARN("DEBUG: Unable to retrieve flush buffer fd (%d)", ret);
 			return ret;
 		}
 
-		NCCL_OFI_TRACE(NCCL_NET, "Registering flush buffer using DMA BUF fd: %d offset: %ld", fd, offset);
+		NCCL_OFI_INFO(NCCL_NET, "DEBUG: Registering flush buffer using DMA BUF fd: %d offset: %ld", fd, offset);
 
 		ret = this->reg_internal_mr_dma_buf(this->flush_buff.buffer, fd, offset, system_page_size,
 						NCCL_PTR_CUDA, &mr_handle);
 		close(fd);
 	} else {
+		NCCL_OFI_INFO(NCCL_NET, "DEBUG: DMA BUF not viable/supported, using regular MR registration");
 		ret = this->reg_internal_mr(this->flush_buff.buffer, system_page_size, NCCL_PTR_CUDA, &mr_handle);
 	}
 
 #else
+	NCCL_OFI_INFO(NCCL_NET, "DEBUG: DMA BUF not compiled in, using regular MR registration");
 	ret = this->reg_internal_mr(this->flush_buff.buffer, system_page_size, NCCL_PTR_CUDA, &mr_handle);
 #endif
 
 	if (OFI_UNLIKELY(ret != 0)) {
-		NCCL_OFI_WARN("Could not register dummy buffer for flush, dev: %d",
-			      dev_id);
+		NCCL_OFI_WARN("DEBUG: Could not register dummy buffer for flush, dev: %d, ret: %d",
+			      dev_id, ret);
 
+		NCCL_OFI_INFO(NCCL_NET, "DEBUG: Cleaning up CUDA flush buffer after registration failure");
 		rc = nccl_net_ofi_cuda_mem_free(&this->flush_buff.buffer_base);
 		if (rc != 0) {
-			NCCL_OFI_WARN("Unable to deallocate flush buffer (%d)",
+			NCCL_OFI_WARN("DEBUG: Unable to deallocate flush buffer (%d)",
 				      rc);
 		}
 		this->flush_buff.buffer = MAP_FAILED;
+	} else {
+		NCCL_OFI_INFO(NCCL_NET, "DEBUG: Successfully registered CUDA flush buffer");
 	}
 #endif
 	this->flush_buff.mr_handle = mr_handle;
@@ -6323,7 +6363,7 @@ int nccl_net_ofi_rdma_ep_t::init_rail_ofi_resources(nccl_net_ofi_rdma_device_t *
 		domain_rail = domain_arg->rdma_domain_get_rail(rail_id);
 		rail = this->rdma_endpoint_get_rail(rail_id);
 
-		ret = nccl_net_ofi_rdma_ep_t::ep_rail_init(dev_id, rail_id, rail_dev, 
+		ret = nccl_net_ofi_rdma_ep_t::ep_rail_init(dev_id, rail_id, rail_dev,
 							   domain_rail, rail, FI_TC_UNSPEC);
 		if (ret != 0) {
 			NCCL_OFI_WARN("Initializing rail %d failed", rail_id);
@@ -6480,7 +6520,7 @@ nccl_net_ofi_ep_t *nccl_net_ofi_rdma_domain_t::create_endpoint()
 	/* Allocate endpoint */
 	auto *ep = new nccl_net_ofi_rdma_ep_t(this);
 
-	NCCL_OFI_TRACE(NCCL_NET, "RDMA endpoint %p for dev #%d is created", ep, 
+	NCCL_OFI_TRACE(NCCL_NET, "RDMA endpoint %p for dev #%d is created", ep,
 		       device_ptr->dev_id);
 
 	/* During plugin initialization, this function is invoked the
@@ -6644,10 +6684,15 @@ nccl_net_ofi_rdma_domain_t::nccl_net_ofi_rdma_domain_t(nccl_net_ofi_rdma_device_
 	/*
 	 * Setup flush resources.
 	 */
+	NCCL_OFI_INFO(NCCL_NET, "DEBUG: RDMA domain constructor calling alloc_and_reg_flush_buff for dev_id %d", device_arg->dev_id);
+	NCCL_OFI_INFO(NCCL_NET, "DEBUG: ofi_nccl_gdr_flush_disable() = %d", ofi_nccl_gdr_flush_disable());
+
 	ret = this->alloc_and_reg_flush_buff(device_arg->dev_id);
 	if (OFI_UNLIKELY(ret != 0)) {
+		NCCL_OFI_WARN("DEBUG: RDMA domain constructor: alloc_and_reg_flush_buff failed with ret=%d", ret);
 		throw std::runtime_error("RDMA domain constructor: flush buffer alloc/reg failed");
 	}
+	NCCL_OFI_INFO(NCCL_NET, "DEBUG: RDMA domain constructor: flush buffer allocation succeeded");
 
 	/* Create scheduler */
 	ret = nccl_net_ofi_threshold_scheduler_init(this->num_rails, &this->scheduler);
@@ -7126,12 +7171,12 @@ int nccl_net_ofi_rdma_init(const char *provider_filter,
 		return ncclInvalidArgument;
 	}
 
-	/* 
+	/*
 	* NCCL Net v9 API Optimization for LL/LL128 Protocols
-	* 
+	*
 	* Background:
-	* When using LL (Low Latency) or LL128 protocols, NCCL sets the request pointer 
-	* to NCCL_NET_OPTIONAL_RECV_COMPLETION in irecv() calls. This indicates that 
+	* When using LL (Low Latency) or LL128 protocols, NCCL sets the request pointer
+	* to NCCL_NET_OPTIONAL_RECV_COMPLETION in irecv() calls. This indicates that
 	* the plugin can complete a receiver request early without plugin explicitly
 	* polling the CQ to validate data arrival. This is achievable because NCCL itself
 	* following LL protocol semantics will validate data arrival by checking the flag bytes.

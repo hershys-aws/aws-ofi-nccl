@@ -33,11 +33,67 @@ CXXLINK = OMPI_CXX="$(CXX)" MPICH_CXX="$(CXX)" \
 if ENABLE_FUNC_TESTS
 noinst_HEADERS = test-common.h
 
-bin_PROGRAMS = nccl_connection nccl_message_transfer ring inflight_close reuse_listen_comm
+bin_PROGRAMS = nccl_connection nccl_message_transfer ring inflight_close reuse_listen_comm \
+	multi_comm_domain comm_abort_scenarios resource_cleanup stress_scale
 
 nccl_connection_SOURCES = nccl_connection.cpp
 nccl_message_transfer_SOURCES = nccl_message_transfer.cpp
 ring_SOURCES = ring.cpp
 inflight_close_SOURCES = inflight_close.cpp
 reuse_listen_comm_SOURCES = reuse_listen_comm.cpp
+multi_comm_domain_SOURCES = multi_comm_domain.cpp
+comm_abort_scenarios_SOURCES = comm_abort_scenarios.cpp
+resource_cleanup_SOURCES = resource_cleanup.cpp
+stress_scale_SOURCES = stress_scale.cpp
+
+# SLURM functional test targets
+check-functional: $(bin_PROGRAMS)
+	@echo "Running functional tests on SLURM..."
+	@if [ -n "$(TEST)" ]; then \
+		echo "Running specific test: $(TEST)"; \
+		$(srcdir)/run-slurm-tests.sh "$(TEST)"; \
+	else \
+		echo "Running all functional tests"; \
+		$(srcdir)/run-slurm-tests.sh; \
+	fi
+
+# Alternative target name for consistency
+check-functional-tests: check-functional
+
+# Force interactive mode
+check-functional-interactive: $(bin_PROGRAMS)
+	@echo "Running functional tests on SLURM (interactive mode)..."
+	@if [ -n "$(TEST)" ]; then \
+		echo "Running specific test: $(TEST)"; \
+		$(srcdir)/run-slurm-tests.sh --interactive "$(TEST)"; \
+	else \
+		echo "Running all functional tests"; \
+		$(srcdir)/run-slurm-tests.sh --interactive; \
+	fi
+
+# Force batch mode
+check-functional-batch: $(bin_PROGRAMS)
+	@echo "Running functional tests on SLURM (batch mode)..."
+	@if [ -n "$(TEST)" ]; then \
+		echo "Running specific test: $(TEST)"; \
+		$(srcdir)/run-slurm-tests.sh --batch "$(TEST)"; \
+	else \
+		echo "Running all functional tests"; \
+		$(srcdir)/run-slurm-tests.sh --batch; \
+	fi
+
+# Clean targets for SLURM-generated files
+clean-functional:
+	@echo "Cleaning SLURM functional test files..."
+	@rm -f slurm-*.out slurm-*.err slurm_job_*.sh
+	@echo "SLURM functional test files cleaned."
+
+# Clean all generated files (including SLURM files)
+clean-local: clean-functional
+
+# Alternative clean target name
+clean-slurm: clean-functional
+
+.PHONY: check-functional check-functional-tests check-functional-interactive check-functional-batch clean-functional clean-slurm
+
 endif

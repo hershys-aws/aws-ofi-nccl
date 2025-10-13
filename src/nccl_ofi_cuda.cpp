@@ -158,7 +158,17 @@ int nccl_net_ofi_cuda_mem_free(void *ptr)
 
 int nccl_net_ofi_cuda_mem_copy_host_to_device(void *dst, void *src, size_t size)
 {
+	NCCL_OFI_INFO(NCCL_NET, "DEBUG: cuMemcpy called - dst=%p, src=%p, size=%zu", dst, src, size);
+
 	CUresult ret = pfn_cuMemcpy((CUdeviceptr)dst, (CUdeviceptr)src, size);
+	NCCL_OFI_INFO(NCCL_NET, "DEBUG: cuMemcpy result - CUresult=%d, CUDA_SUCCESS=%d, returning %d",
+		ret, CUDA_SUCCESS, ret == CUDA_SUCCESS ? 0 : -EINVAL);
+
+	if (ret != CUDA_SUCCESS) {
+		NCCL_OFI_WARN("DEBUG: cuMemcpy failed with CUresult=%d (CUDA_ERROR_INVALID_VALUE=%d, CUDA_ERROR_INVALID_CONTEXT=%d)",
+			ret, CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_INVALID_CONTEXT);
+	}
+
 	return ret == CUDA_SUCCESS ? 0 : -EINVAL;
 }
 
