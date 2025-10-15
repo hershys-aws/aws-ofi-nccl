@@ -564,11 +564,11 @@ ncclResult_t nccl_net_ofi_regMrDmaBuf_v6(void* comm, void* data, size_t size,
 	switch (base_comm->type) {
 	case NCCL_NET_OFI_SEND_COMM:
 		send_comm = (nccl_net_ofi_send_comm_t *)base_comm;
-		ret = send_comm->regMr(send_comm, &cache_key, type, mhandle);
+		ret = send_comm->regMr(&cache_key, type, mhandle);
 		break;
 	case NCCL_NET_OFI_RECV_COMM:
 		recv_comm = (nccl_net_ofi_recv_comm_t *)base_comm;
-		ret = recv_comm->regMr(recv_comm, &cache_key, type, mhandle);
+		ret = recv_comm->regMr(&cache_key, type, mhandle);
 		break;
 	case NCCL_NET_OFI_BASE_COMM:
 	case NCCL_NET_OFI_LISTEN_COMM:
@@ -606,11 +606,11 @@ ncclResult_t nccl_net_ofi_deregMr_v2(void *comm, void *mhandle)
 	switch (base_comm->type) {
 	case NCCL_NET_OFI_SEND_COMM:
 		send_comm = (nccl_net_ofi_send_comm_t *)base_comm;
-		ret = send_comm->deregMr(send_comm, (nccl_net_ofi_mr_handle_t *)mhandle);
+		ret = send_comm->deregMr((nccl_net_ofi_mr_handle_t *)mhandle);
 		break;
 	case NCCL_NET_OFI_RECV_COMM:
 		recv_comm = (nccl_net_ofi_recv_comm_t *)base_comm;
-		ret = recv_comm->deregMr(recv_comm, (nccl_net_ofi_mr_handle_t *)mhandle);
+		ret = recv_comm->deregMr((nccl_net_ofi_mr_handle_t *)mhandle);
 		break;
 	case NCCL_NET_OFI_BASE_COMM:
 	case NCCL_NET_OFI_LISTEN_COMM:

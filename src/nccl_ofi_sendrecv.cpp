@@ -818,22 +818,21 @@ unlock:
 	return ret;
 }
 
-static int sendrecv_send_comm_reg_mr(nccl_net_ofi_send_comm_t *comm, nccl_ofi_mr_ckey_ref ckey, int type, void **mhandle)
+int nccl_net_ofi_sendrecv_send_comm_t::regMr(nccl_ofi_mr_ckey_ref ckey, int type, void **mhandle)
 {
-	return sendrecv_comm_mr_base_reg(&comm->base, ckey, type, reinterpret_cast<nccl_net_ofi_sendrecv_mr_handle_t **>(mhandle));
+	return sendrecv_comm_mr_base_reg(&base, ckey, type, reinterpret_cast<nccl_net_ofi_sendrecv_mr_handle_t **>(mhandle));
 }
 
-static int sendrecv_recv_comm_reg_mr(nccl_net_ofi_recv_comm_t *comm, nccl_ofi_mr_ckey_ref ckey, int type, void **mhandle)
+int nccl_net_ofi_sendrecv_recv_comm_t::regMr(nccl_ofi_mr_ckey_ref ckey, int type, void **mhandle)
 {
-	return sendrecv_comm_mr_base_reg(&comm->base, ckey, type, reinterpret_cast<nccl_net_ofi_sendrecv_mr_handle_t **>(mhandle));
+	return sendrecv_comm_mr_base_reg(&base, ckey, type, reinterpret_cast<nccl_net_ofi_sendrecv_mr_handle_t **>(mhandle));
 }
 
-static int sendrecv_recv_comm_dereg_mr(nccl_net_ofi_recv_comm_t *recv_comm,
-				       nccl_net_ofi_mr_handle_t *mhandle)
+int nccl_net_ofi_sendrecv_recv_comm_t::deregMr(nccl_net_ofi_mr_handle_t *mhandle)
 {
 	/* Retrieve and validate endpoint */
 	nccl_net_ofi_sendrecv_ep_t *ep =
-		(nccl_net_ofi_sendrecv_ep_t *)recv_comm->base.ep;
+		(nccl_net_ofi_sendrecv_ep_t *)base.ep;
 	if (OFI_UNLIKELY(ep == NULL)) {
 		NCCL_OFI_WARN("Invalid endpoint provided");
 		return -EINVAL;
@@ -1315,8 +1314,7 @@ static nccl_net_ofi_sendrecv_recv_comm_t *sendrecv_recv_comm_prepare(nccl_net_of
 	r_comm->base.type = NCCL_NET_OFI_RECV_COMM;
 	r_comm->base.ep = ep;
 	r_comm->base.dev_id = dev_id;
-	r_comm->regMr = sendrecv_recv_comm_reg_mr;
-	r_comm->deregMr = sendrecv_recv_comm_dereg_mr;
+
 	r_comm->recv = sendrecv_recv_comm_recv;
 	r_comm->flush = sendrecv_recv_comm_flush;
 	r_comm->close = sendrecv_recv_comm_close;
@@ -1670,12 +1668,11 @@ int nccl_net_ofi_sendrecv_ep_t::listen(nccl_net_ofi_conn_handle_t *handle,
 	return 0;
 }
 
-static int sendrecv_send_comm_dereg_mr(nccl_net_ofi_send_comm_t *send_comm,
-				       nccl_net_ofi_mr_handle_t *mhandle)
+int nccl_net_ofi_sendrecv_send_comm_t::deregMr(nccl_net_ofi_mr_handle_t *mhandle)
 {
 	/* Retrieve and validate endpoint */
 	nccl_net_ofi_sendrecv_ep_t *ep =
-		(nccl_net_ofi_sendrecv_ep_t *)send_comm->base.ep;
+		(nccl_net_ofi_sendrecv_ep_t *)base.ep;
 	if (OFI_UNLIKELY(ep == NULL)) {
 		NCCL_OFI_WARN("Invalid endpoint provided");
 		return -EINVAL;
@@ -1867,8 +1864,7 @@ static inline int sendrecv_send_comm_create(nccl_net_ofi_conn_handle_t *handle,
 	ret_s_comm->base.type = NCCL_NET_OFI_SEND_COMM;
 	ret_s_comm->base.ep = ep;
 	ret_s_comm->base.dev_id = device->dev_id;
-	ret_s_comm->regMr = sendrecv_send_comm_reg_mr;
-	ret_s_comm->deregMr = sendrecv_send_comm_dereg_mr;
+
 	ret_s_comm->send = sendrecv_send_comm_send;
 	ret_s_comm->close = sendrecv_send_comm_close;
 	ret_s_comm->write = NULL;

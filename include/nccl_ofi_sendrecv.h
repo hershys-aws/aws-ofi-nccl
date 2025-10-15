@@ -90,6 +90,10 @@ public:
 
 	// Methods moved from static functions
 	int free_req(int dev_id, nccl_net_ofi_sendrecv_req_t *req, bool dec_inflight_reqs);
+	
+	// Virtual method overrides
+	int regMr(nccl_ofi_mr_ckey_ref ckey, int type, void **mhandle) override;
+	int deregMr(nccl_net_ofi_mr_handle_t *mhandle) override;
 };
 
 /* Metadata about dummy flush buffer */
@@ -121,6 +125,10 @@ public:
 
 	// Methods moved from static functions
 	int free_req(int dev_id, nccl_net_ofi_sendrecv_req_t *req, bool dec_inflight_reqs);
+	
+	// Virtual method overrides
+	int regMr(nccl_ofi_mr_ckey_ref ckey, int type, void **mhandle) override;
+	int deregMr(nccl_net_ofi_mr_handle_t *mhandle) override;
 };
 
 /* Forward declarations needed for sendrecv transport endpoint type */

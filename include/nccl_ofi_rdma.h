@@ -571,6 +571,10 @@ public:
 		assert(control_rails && rail_id < num_control_rails);
 		return &control_rails[rail_id];
 	}
+	
+	// Virtual method overrides
+	int regMr(nccl_ofi_mr_ckey_ref ckey, int type, void **mhandle) override;
+	int deregMr(nccl_net_ofi_mr_handle_t *mhandle) override;
 };
 
 /*
@@ -683,6 +687,10 @@ public:
 		assert(control_rails && rail_id < num_control_rails);
 		return &control_rails[rail_id];
 	}
+	
+	// Virtual method overrides
+	int regMr(nccl_ofi_mr_ckey_ref ckey, int type, void **mhandle) override;
+	int deregMr(nccl_net_ofi_mr_handle_t *mhandle) override;
 };
 
 class nccl_net_ofi_rdma_listen_comm_t : public nccl_net_ofi_listen_comm_t {

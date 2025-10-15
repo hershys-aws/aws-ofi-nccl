@@ -787,10 +787,11 @@ public:
 	nccl_net_ofi_comm_t base;
 	// TODO: Potentially store this here: int trafficClass;
 
+	// Pure virtual methods
+	virtual int regMr(nccl_ofi_mr_ckey_ref ckey, int type, void **mhandle) = 0;
+	virtual int deregMr(nccl_net_ofi_mr_handle_t *mhandle) = 0;
+	
 	// Keep existing function pointers for compatibility
-	int (*regMr)(nccl_net_ofi_send_comm_t *send_comm, nccl_ofi_mr_ckey_ref ckey, int type,
-				 void **mhandle);
-	int (*deregMr)(nccl_net_ofi_send_comm_t *send_comm, nccl_net_ofi_mr_handle_t *mhandle);
 	int (*send)(nccl_net_ofi_send_comm_t *send_comm, void *data, size_t size, int tag,
 			     nccl_net_ofi_mr_handle_t *mhandle, nccl_net_ofi_req_t **req);
 	int (*close)(nccl_net_ofi_send_comm_t *send_comm);
@@ -800,8 +801,6 @@ public:
 			    uint64_t dest, uint64_t mr_key, nccl_net_ofi_req_t **request);
 
 	// Add virtual methods for future use
-	virtual int regMr_virtual(nccl_ofi_mr_ckey_ref ckey, int type, void **mhandle) { return regMr(this, ckey, type, mhandle); }
-	virtual int deregMr_virtual(nccl_net_ofi_mr_handle_t *mhandle) { return deregMr(this, mhandle); }
 	virtual int send_virtual(void *data, size_t size, int tag, nccl_net_ofi_mr_handle_t *mhandle, nccl_net_ofi_req_t **req) { return send(this, data, size, tag, mhandle, req); }
 	virtual int close_virtual() { return close(this); }
 	virtual int write_virtual(void* src, size_t size, void* src_mhandle, uint64_t dest, uint64_t mr_key, nccl_net_ofi_req_t **req) { return write(this, src, size, src_mhandle, dest, mr_key, req); }
@@ -813,10 +812,11 @@ class nccl_net_ofi_recv_comm_t {
 public:
 	nccl_net_ofi_comm_t base;
 
+	// Pure virtual methods
+	virtual int regMr(nccl_ofi_mr_ckey_ref ckey, int type, void **mhandle) = 0;
+	virtual int deregMr(nccl_net_ofi_mr_handle_t *mhandle) = 0;
+	
 	// Keep existing function pointers for compatibility
-	int (*regMr)(nccl_net_ofi_recv_comm_t *recv_comm, nccl_ofi_mr_ckey_ref ckey, int type,
-				 void **mhandle);
-	int (*deregMr)(nccl_net_ofi_recv_comm_t *recv_comm, nccl_net_ofi_mr_handle_t *mhandle);
 	int (*recv)(nccl_net_ofi_recv_comm_t *recv_comm, int n, void **data, size_t *sizes, int *tags,
 			     nccl_net_ofi_mr_handle_t **mhandles, nccl_net_ofi_req_t **req);
 	int (*flush)(nccl_net_ofi_recv_comm_t *recv_comm, int n, void **data, int *sizes,
@@ -826,8 +826,6 @@ public:
 		    uint64_t src, uint64_t mr_key, nccl_net_ofi_req_t **req);
 
 	// Add virtual methods for future use
-	virtual int regMr_virtual(nccl_ofi_mr_ckey_ref ckey, int type, void **mhandle) { return regMr(this, ckey, type, mhandle); }
-	virtual int deregMr_virtual(nccl_net_ofi_mr_handle_t *mhandle) { return deregMr(this, mhandle); }
 	virtual int recv_virtual(int n, void **data, size_t *sizes, int *tags, nccl_net_ofi_mr_handle_t **mhandles, nccl_net_ofi_req_t **req) { return recv(this, n, data, sizes, tags, mhandles, req); }
 	virtual int flush_virtual(int n, void **data, int *sizes, nccl_net_ofi_mr_handle_t **mhandles, nccl_net_ofi_req_t **req) { return flush(this, n, data, sizes, mhandles, req); }
 	virtual int close_virtual() { return close(this); }
