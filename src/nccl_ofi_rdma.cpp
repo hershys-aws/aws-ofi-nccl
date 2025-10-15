@@ -3792,30 +3792,28 @@ void nccl_net_ofi_rdma_ep_t::rdma_endpoint_abort()
  *
  * To directly free the communicator resources, use recv_comm_destroy.
  */
-static int recv_close_deferred(nccl_net_ofi_recv_comm_t *recv_comm)
+int nccl_net_ofi_rdma_recv_comm_t::close()
 {
-	nccl_net_ofi_rdma_recv_comm_t *r_comm =
-		(nccl_net_ofi_rdma_recv_comm_t *)recv_comm;
 	int ret = 0;
 
 	/* If there are still requests in-flight (pending completions) that are not
 	 * flush requests that we marked as complete in "test" before getting the completion
 	 * event, we need to also close the endpoint and invalidate the domain */
-	if (r_comm->num_inflight_reqs > 0 && r_comm->num_inflight_reqs > r_comm->num_pending_flush_comps) {
+	if (this->num_inflight_reqs > 0 && this->num_inflight_reqs > this->num_pending_flush_comps) {
 		NCCL_OFI_WARN("Closing recv_comm %p with inflight requests. Invalidating domain",
-			      r_comm);
+			      this);
 
-		auto *ep = r_comm->get_ep();
+		auto *ep = this->get_ep();
 		ep->rdma_endpoint_abort();
 	}
 
-	r_comm->comm_active = false;
+	this->comm_active = false;
 
 	nccl_net_ofi_mutex_lock(&comm_cleanup_list_lock);
 
 	/* Defer cleanup until we deliver all outstanding control messages
 	   and deliver the close message */
-	r_comm_cleanup_list->push_back(r_comm);
+	r_comm_cleanup_list->push_back(this);
 
 	assert(num_open_comms > 0);
 	num_open_comms--;
@@ -4237,7 +4235,7 @@ static nccl_net_ofi_rdma_recv_comm_t *prepare_recv_comm(nccl_net_ofi_rdma_domain
 	r_comm->base.dev_id = dev_id;
 	r_comm->recv = recv;
 	r_comm->flush = flush;
-	r_comm->close = recv_close_deferred;
+
 	r_comm->read = rma_read;
 
 	r_comm->comm_active = true;
@@ -5424,36 +5422,33 @@ static inline int check_post_rx_buff_req(nccl_net_ofi_rdma_req_t *rx_buff_req)
  * @brief	Send a message. This "interface function" is called, indirectly, from
  *       	the application
  */
-static int send(nccl_net_ofi_send_comm_t *send_comm, void *data, size_t size, int tag,
+int nccl_net_ofi_rdma_send_comm_t::send(void *data, size_t size, int tag,
 			 nccl_net_ofi_mr_handle_t *mhandle, nccl_net_ofi_req_t **base_req)
 {
 	int ret = 0;
-	nccl_net_ofi_rdma_send_comm_t *s_comm = (nccl_net_ofi_rdma_send_comm_t *)send_comm;
 	nccl_net_ofi_rdma_mr_handle_t *mr_handle = (nccl_net_ofi_rdma_mr_handle_t *)mhandle;
 	nccl_net_ofi_rdma_ep_t *ep = NULL;
 	nccl_net_ofi_rdma_domain_t *domain = NULL;
 	nccl_net_ofi_rdma_req_t *req = NULL;
-	uint16_t msg_seq_num = s_comm->next_msg_seq_num;
+	uint16_t msg_seq_num = this->next_msg_seq_num;
 	bool have_ctrl = false;
 	bool eager = false;
 
-	assert(s_comm != NULL);
-
-	if (s_comm->comm_active == false) {
+	if (this->comm_active == false) {
 		NCCL_OFI_WARN("Called isend on inactive communicator");
 		ret = -EINVAL;
 		return ret;
 	}
 
 	/* Support only NCCL_OFI_MAX_REQUESTS inflight requests. */
-	if (OFI_UNLIKELY(s_comm->num_inflight_reqs == NCCL_OFI_MAX_SEND_REQUESTS)) {
+	if (OFI_UNLIKELY(this->num_inflight_reqs == NCCL_OFI_MAX_SEND_REQUESTS)) {
 		ret = -EINVAL;
 		NCCL_OFI_WARN("Can not support more than %d inflight requests",
 			      NCCL_OFI_MAX_SEND_REQUESTS);
 		return ret;
 	}
 
-	ep = (nccl_net_ofi_rdma_ep_t *)s_comm->base.ep;
+	ep = (nccl_net_ofi_rdma_ep_t *)this->base.ep;
 	assert(ep != NULL);
 
 	domain = ep->rdma_endpoint_get_domain();
@@ -5491,10 +5486,10 @@ static int send(nccl_net_ofi_send_comm_t *send_comm, void *data, size_t size, in
 		mr_handle = domain->flush_buff.mr_handle;
 	}
 
-	have_ctrl = has_ctrl_msg(s_comm, msg_seq_num);
+	have_ctrl = has_ctrl_msg(this, msg_seq_num);
 
 	/* Determine if this should be sent eagerly. */
-	if (!have_ctrl && (ssize_t)size <= ep->eager_send_size && s_comm->num_inflight_writes == 0) {
+	if (!have_ctrl && (ssize_t)size <= ep->eager_send_size && this->num_inflight_writes == 0) {
 		eager = true;
 	}
 
@@ -5509,10 +5504,10 @@ static int send(nccl_net_ofi_send_comm_t *send_comm, void *data, size_t size, in
 		/* Memory synchronization point to ensure that the data in the control msg is not
 		 * read before the sequence number is checked */
 		__sync_synchronize();
-		s_comm->n_ctrl_received += 1;
+		this->n_ctrl_received += 1;
 	}
 
-	ret = alloc_rdma_send_req(s_comm, msg_seq_num, data,
+	ret = alloc_rdma_send_req(this, msg_seq_num, data,
 				  size, mr_handle, eager, &req);
 	if (OFI_UNLIKELY(ret != 0)) {
 		goto error;
@@ -5523,7 +5518,7 @@ static int send(nccl_net_ofi_send_comm_t *send_comm, void *data, size_t size, in
 		 * For already received RDMA control message, populate
 		 * the RDMA write metadata from the rx buffer
 		 */
-		ret = update_send_data_from_remote(s_comm, req);
+		ret = update_send_data_from_remote(this, req);
 		if (OFI_UNLIKELY(ret != 0)) {
 			NCCL_OFI_WARN("Failed to copy ctrl data");
 			goto error;
@@ -5535,10 +5530,10 @@ static int send(nccl_net_ofi_send_comm_t *send_comm, void *data, size_t size, in
 	 * At this point, we've successfully inserted a new request,
 	 * so update the num inflight
 	 */
-	(s_comm->num_inflight_reqs)++;
+	(this->num_inflight_reqs)++;
 
 	if (!eager) {
-		(s_comm->num_inflight_writes)++;
+		(this->num_inflight_writes)++;
 	}
 
 	NCCL_OFI_TRACE_SEND(req->dev_id, size, s_comm, msg_seq_num, req, base_req);
@@ -5564,7 +5559,7 @@ static int send(nccl_net_ofi_send_comm_t *send_comm, void *data, size_t size, in
 	/* Return request to NCCL */
 	*base_req = &req->base;
 	/* Increment next_msg_seq_num for next call */
-	s_comm->next_msg_seq_num = (s_comm->next_msg_seq_num + 1) & MSG_SEQ_NUM_MASK;
+	this->next_msg_seq_num = (this->next_msg_seq_num + 1) & MSG_SEQ_NUM_MASK;
 
 	goto exit;
 
@@ -5587,31 +5582,28 @@ static int send(nccl_net_ofi_send_comm_t *send_comm, void *data, size_t size, in
  *
  * To directly free the communicator resources, use send_comm_destroy.
  */
-static int send_close_deferred(nccl_net_ofi_send_comm_t *send_comm)
+int nccl_net_ofi_rdma_send_comm_t::close()
 {
 	int ret = 0;
 
-	nccl_net_ofi_rdma_send_comm_t *s_comm =
-		(nccl_net_ofi_rdma_send_comm_t *)send_comm;
-
 	/* If there are still requests in-flight, we need to also close the
 	 * endpoint and invalidate the domain */
-	if (s_comm->num_inflight_reqs > 0) {
+	if (this->num_inflight_reqs > 0) {
 		NCCL_OFI_WARN("Closing send_comm %p with inflight requests. Invalidating domain",
-				s_comm);
+				this);
 
-		auto *ep = s_comm->get_ep();
+		auto *ep = this->get_ep();
 		ep->rdma_endpoint_abort();
 	} else {
-		assert (s_comm->num_inflight_writes == 0);
+		assert (this->num_inflight_writes == 0);
 	}
 
-	s_comm->comm_active = false;
+	this->comm_active = false;
 
 	nccl_net_ofi_mutex_lock(&comm_cleanup_list_lock);
 
 	/* Deferred cleanup */
-	s_comm_cleanup_list->push_back(s_comm);
+	s_comm_cleanup_list->push_back(this);
 
 	assert(num_open_comms > 0);
 	num_open_comms--;
@@ -5981,8 +5973,8 @@ int nccl_net_ofi_rdma_ep_t::create_send_comm(nccl_net_ofi_rdma_send_comm_t **s_c
 	ret_s_comm->base.type = NCCL_NET_OFI_SEND_COMM;
 	ret_s_comm->base.ep = this;
 	ret_s_comm->base.dev_id = dev_id;
-	ret_s_comm->send = send;
-	ret_s_comm->close = send_close_deferred;
+
+
 	ret_s_comm->write = rma_write;
 	ret_s_comm->write_inline = rma_write_inline;
 

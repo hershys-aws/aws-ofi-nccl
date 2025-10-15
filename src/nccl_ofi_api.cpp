@@ -663,7 +663,7 @@ ncclResult_t nccl_net_ofi_isend_v9(void* sendComm, void* data, size_t size,
 		return check_return(ncclInternalError);
 	}
 
-	int ret = send_comm->send(send_comm, data, size, tag, handle, base_req);
+	int ret = send_comm->send(data, size, tag, handle, base_req);
 	return nccl_net_ofi_retval_translate(ret);
 }
 
@@ -860,7 +860,7 @@ ncclResult_t nccl_net_ofi_closeSend_v2(void *sComm)
 		return check_return(ncclInternalError);
 	}
 
-	int ret = send_comm->close(send_comm);
+	int ret = send_comm->close();
 
 	return nccl_net_ofi_retval_translate(ret);
 }
@@ -887,7 +887,7 @@ ncclResult_t nccl_net_ofi_closeRecv_v2(void *rComm)
 		return check_return(ncclInternalError);
 	}
 
-	int ret = recv_comm->close(recv_comm);
+	int ret = recv_comm->close();
 
 	return nccl_net_ofi_retval_translate(ret);
 }

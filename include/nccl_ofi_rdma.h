@@ -575,6 +575,8 @@ public:
 	// Virtual method overrides
 	int regMr(nccl_ofi_mr_ckey_ref ckey, int type, void **mhandle) override;
 	int deregMr(nccl_net_ofi_mr_handle_t *mhandle) override;
+	int send(void *data, size_t size, int tag, nccl_net_ofi_mr_handle_t *mhandle, nccl_net_ofi_req_t **req) override;
+	int close() override;
 };
 
 /*
@@ -691,6 +693,7 @@ public:
 	// Virtual method overrides
 	int regMr(nccl_ofi_mr_ckey_ref ckey, int type, void **mhandle) override;
 	int deregMr(nccl_net_ofi_mr_handle_t *mhandle) override;
+	int close() override;
 };
 
 class nccl_net_ofi_rdma_listen_comm_t : public nccl_net_ofi_listen_comm_t {

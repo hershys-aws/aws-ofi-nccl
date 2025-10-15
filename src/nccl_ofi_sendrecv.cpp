@@ -999,15 +999,13 @@ void nccl_net_ofi_sendrecv_ep_t::sendrecv_endpoint_abort()
 }
 
 
-static int sendrecv_recv_comm_close(nccl_net_ofi_recv_comm_t *recv_comm)
+int nccl_net_ofi_sendrecv_recv_comm_t::close()
 {
-	nccl_net_ofi_sendrecv_recv_comm_t *r_comm =
-		(nccl_net_ofi_sendrecv_recv_comm_t *)recv_comm;
 	int ret = 0;
 	nccl_net_ofi_sendrecv_mr_handle_t *mr_handle = nullptr;
 
 	/* Retrieve and validate endpoint */
-	auto *ep = reinterpret_cast<nccl_net_ofi_sendrecv_ep_t *>(r_comm->base.ep);
+	auto *ep = reinterpret_cast<nccl_net_ofi_sendrecv_ep_t *>(this->base.ep);
 	if (OFI_UNLIKELY(ep == NULL)) {
 		ret = -EINVAL;
 		NCCL_OFI_WARN("Invalid endpoint provided");
@@ -1016,9 +1014,9 @@ static int sendrecv_recv_comm_close(nccl_net_ofi_recv_comm_t *recv_comm)
 
 	/* If there are still requests in-flight, we need to also close the
 	 * endpoint and invalidate the domain */
-	if (r_comm->num_inflight_reqs > 0) {
+	if (this->num_inflight_reqs > 0) {
 		NCCL_OFI_WARN("Closing recv_comm %p with inflight requests. Invalidating domain",
-			      r_comm);
+			      this);
 
 		ep->sendrecv_endpoint_abort();
 	}
@@ -1026,27 +1024,27 @@ static int sendrecv_recv_comm_close(nccl_net_ofi_recv_comm_t *recv_comm)
 	if (!ofi_nccl_gdr_flush_disable() && support_gdr == GDR_SUPPORTED && !cuda_flush) {
 		NCCL_OFI_TRACE(NCCL_NET, "De-registering buffer for flush operations");
 		/* Deregister Flush buffer memory region */
-		mr_handle = r_comm->flush_buff.mr_handle;
+		mr_handle = this->flush_buff.mr_handle;
 		if (mr_handle) {
 			mr_handle->mr.reset();
 		}
-		ret = nccl_net_ofi_dealloc_mr_buffer(r_comm->flush_buff.host_buffer,
+		ret = nccl_net_ofi_dealloc_mr_buffer(this->flush_buff.host_buffer,
 						    system_page_size);
 		if (ret != 0) {
 			NCCL_OFI_WARN("Unable to deallocate flush buffer (%d)", ret);
 			goto exit;
 		}
-		r_comm->flush_buff.host_buffer = MAP_FAILED;
+		this->flush_buff.host_buffer = MAP_FAILED;
 	}
 
-	nccl_ofi_freelist_fini(r_comm->nccl_ofi_reqs_fl);
+	nccl_ofi_freelist_fini(this->nccl_ofi_reqs_fl);
 
-	if (r_comm->receiver) {
-		delete r_comm->receiver;
-		r_comm->receiver = nullptr;
+	if (this->receiver) {
+		delete this->receiver;
+		this->receiver = nullptr;
 	}
 
-	free(recv_comm);
+	free(this);
 
 	ret = ep->release_ep(false, false);
  exit:
@@ -1317,7 +1315,7 @@ static nccl_net_ofi_sendrecv_recv_comm_t *sendrecv_recv_comm_prepare(nccl_net_of
 
 	r_comm->recv = sendrecv_recv_comm_recv;
 	r_comm->flush = sendrecv_recv_comm_flush;
-	r_comm->close = sendrecv_recv_comm_close;
+
 	r_comm->read = NULL;
 
 	/* Increase tag ID */
@@ -1694,21 +1692,19 @@ int nccl_net_ofi_sendrecv_send_comm_t::deregMr(nccl_net_ofi_mr_handle_t *mhandle
 	return 0;
 }
 
-static int sendrecv_send_comm_send(nccl_net_ofi_send_comm_t *send_comm, void *data, size_t size, int tag,
+int nccl_net_ofi_sendrecv_send_comm_t::send(void *data, size_t size, int msg_tag,
 				   nccl_net_ofi_mr_handle_t *mhandle, nccl_net_ofi_req_t **base_req)
 {
 	int ret = 0;
-	nccl_net_ofi_sendrecv_send_comm_t *s_comm =
-		(nccl_net_ofi_sendrecv_send_comm_t *)send_comm;
 	auto *mr_handle = reinterpret_cast<nccl_net_ofi_sendrecv_mr_handle_t *>(mhandle);
 	ssize_t rc = 0;
 	nccl_net_ofi_sendrecv_req_t *req = NULL;
 	void *desc = NULL;
-	int dev_id = s_comm->base.dev_id;
+	int dev_id = this->base.dev_id;
 
 	/* Validate endpoint */
 	nccl_net_ofi_sendrecv_ep_t *ep =
-		(nccl_net_ofi_sendrecv_ep_t *)s_comm->base.ep;
+		(nccl_net_ofi_sendrecv_ep_t *)this->base.ep;
 	if (OFI_UNLIKELY(ep == NULL)) {
 		NCCL_OFI_WARN("Invalid endpoint provided");
 		return -EINVAL;
@@ -1720,7 +1716,7 @@ static int sendrecv_send_comm_send(nccl_net_ofi_send_comm_t *send_comm, void *da
 
 
 	/* Support only NCCL_OFI_MAX_REQUESTS inflight requests. */
-	if (OFI_UNLIKELY(s_comm->num_inflight_reqs == NCCL_OFI_MAX_SEND_REQUESTS)) {
+	if (OFI_UNLIKELY(this->num_inflight_reqs == NCCL_OFI_MAX_SEND_REQUESTS)) {
 		ret = -EINVAL;
 		NCCL_OFI_WARN("Can not support more than %d inflight requests",
 			      NCCL_OFI_MAX_SEND_REQUESTS);
@@ -1733,7 +1729,7 @@ static int sendrecv_send_comm_send(nccl_net_ofi_send_comm_t *send_comm, void *da
 	 */
 
 	/* Allocate NCCL OFI request */
-	req = sendrecv_allocate_req(s_comm->nccl_ofi_reqs_fl);
+	req = sendrecv_allocate_req(this->nccl_ofi_reqs_fl);
 	if (OFI_UNLIKELY(req == NULL)) {
 		ret = -ENOMEM;
 		NCCL_OFI_WARN("Unable to get NCCL OFI request for device %d",
@@ -1741,7 +1737,7 @@ static int sendrecv_send_comm_send(nccl_net_ofi_send_comm_t *send_comm, void *da
 		goto error;
 	}
 
-	req->comm = &s_comm->base;
+	req->comm = &this->base;
 	req->dev_id = dev_id;
 	req->direction = NCCL_OFI_SENDRECV_SEND;
 
@@ -1754,8 +1750,8 @@ static int sendrecv_send_comm_send(nccl_net_ofi_send_comm_t *send_comm, void *da
 	 * Try sending data to remote EP; Return NULL request
 	 * if not able to send.
 	 */
-	rc = fi_tsend(s_comm->local_ep, data, size, desc,
-		      s_comm->remote_ep, s_comm->tag, sendrecv_req_get_ofi_context(req));
+	rc = fi_tsend(this->local_ep, data, size, desc,
+		      this->remote_ep, this->tag, sendrecv_req_get_ofi_context(req));
 	if (OFI_UNLIKELY(rc == -FI_EAGAIN)) {
 		/* Make progress for next try */
 		ret = sendrecv_cq_process(domain->cq.get());
@@ -1770,7 +1766,7 @@ static int sendrecv_send_comm_send(nccl_net_ofi_send_comm_t *send_comm, void *da
 		goto error;
 	}
 
-	(s_comm->num_inflight_reqs)++;
+	(this->num_inflight_reqs)++;
 
 	/* Set request size */
 	req->size = size;
@@ -1782,19 +1778,17 @@ static int sendrecv_send_comm_send(nccl_net_ofi_send_comm_t *send_comm, void *da
 
  error:
 	if (req)
-		s_comm->free_req(dev_id, req, false);
+		this->free_req(dev_id, req, false);
  exit:
 	return ret;
 }
 
-static int sendrecv_send_comm_close(nccl_net_ofi_send_comm_t *send_comm)
+int nccl_net_ofi_sendrecv_send_comm_t::close()
 {
-	nccl_net_ofi_sendrecv_send_comm_t *s_comm =
-		(nccl_net_ofi_sendrecv_send_comm_t *)send_comm;
 	int ret = 0;
 
 	/* Retrieve and validate endpoint */
-	auto *ep = reinterpret_cast<nccl_net_ofi_sendrecv_ep_t *>(s_comm->base.ep);
+	auto *ep = reinterpret_cast<nccl_net_ofi_sendrecv_ep_t *>(this->base.ep);
 	if (OFI_UNLIKELY(ep == NULL)) {
 		ret = -EINVAL;
 		NCCL_OFI_WARN("Invalid endpoint provided");
@@ -1803,21 +1797,21 @@ static int sendrecv_send_comm_close(nccl_net_ofi_send_comm_t *send_comm)
 
 	/* If there are still requests in-flight, we need to also close the
 	 * endpoint and invalidate the domain */
-	if (s_comm->num_inflight_reqs > 0) {
+	if (this->num_inflight_reqs > 0) {
 		NCCL_OFI_WARN("Closing send_comm %p with inflight requests. Invalidating domain",
-			      s_comm);
+			      this);
 
 		ep->sendrecv_endpoint_abort();
 	}
 
-	nccl_ofi_freelist_fini(s_comm->nccl_ofi_reqs_fl);
+	nccl_ofi_freelist_fini(this->nccl_ofi_reqs_fl);
 
-	if (s_comm->connector) {
-		delete s_comm->connector;
-		s_comm->connector = nullptr;
+	if (this->connector) {
+		delete this->connector;
+		this->connector = nullptr;
 	}
 
-	free(send_comm);
+	free(this);
 
 	ret = ep->release_ep(false, false);
 
@@ -1865,8 +1859,8 @@ static inline int sendrecv_send_comm_create(nccl_net_ofi_conn_handle_t *handle,
 	ret_s_comm->base.ep = ep;
 	ret_s_comm->base.dev_id = device->dev_id;
 
-	ret_s_comm->send = sendrecv_send_comm_send;
-	ret_s_comm->close = sendrecv_send_comm_close;
+
+
 	ret_s_comm->write = NULL;
 	ret_s_comm->write_inline = NULL;
 	ret_s_comm->tag = 0; /* Populate later from connect response */

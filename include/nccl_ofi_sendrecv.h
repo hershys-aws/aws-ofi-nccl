@@ -94,6 +94,8 @@ public:
 	// Virtual method overrides
 	int regMr(nccl_ofi_mr_ckey_ref ckey, int type, void **mhandle) override;
 	int deregMr(nccl_net_ofi_mr_handle_t *mhandle) override;
+	int send(void *data, size_t size, int tag, nccl_net_ofi_mr_handle_t *mhandle, nccl_net_ofi_req_t **req) override;
+	int close() override;
 };
 
 /* Metadata about dummy flush buffer */
@@ -129,6 +131,7 @@ public:
 	// Virtual method overrides
 	int regMr(nccl_ofi_mr_ckey_ref ckey, int type, void **mhandle) override;
 	int deregMr(nccl_net_ofi_mr_handle_t *mhandle) override;
+	int close() override;
 };
 
 /* Forward declarations needed for sendrecv transport endpoint type */
