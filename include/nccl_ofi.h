@@ -813,18 +813,14 @@ public:
 	virtual int regMr(nccl_ofi_mr_ckey_ref ckey, int type, void **mhandle) = 0;
 	virtual int deregMr(nccl_net_ofi_mr_handle_t *mhandle) = 0;
 	virtual int close() = 0;
+	virtual int recv(int n, void **data, size_t *sizes, int *tags, nccl_net_ofi_mr_handle_t **mhandles, nccl_net_ofi_req_t **req) = 0;
+	virtual int flush(int n, void **data, int *sizes, nccl_net_ofi_mr_handle_t **mhandles, nccl_net_ofi_req_t **req) = 0;
 	
 	// Keep existing function pointers for compatibility
-	int (*recv)(nccl_net_ofi_recv_comm_t *recv_comm, int n, void **data, size_t *sizes, int *tags,
-			     nccl_net_ofi_mr_handle_t **mhandles, nccl_net_ofi_req_t **req);
-	int (*flush)(nccl_net_ofi_recv_comm_t *recv_comm, int n, void **data, int *sizes,
-			      nccl_net_ofi_mr_handle_t **mhandles, nccl_net_ofi_req_t **req);
 	int (*read)(nccl_net_ofi_recv_comm_t *recv_comm, void* dest, size_t size, void* dest_mhandle,
 		    uint64_t src, uint64_t mr_key, nccl_net_ofi_req_t **req);
 
 	// Add virtual methods for future use
-	virtual int recv_virtual(int n, void **data, size_t *sizes, int *tags, nccl_net_ofi_mr_handle_t **mhandles, nccl_net_ofi_req_t **req) { return recv(this, n, data, sizes, tags, mhandles, req); }
-	virtual int flush_virtual(int n, void **data, int *sizes, nccl_net_ofi_mr_handle_t **mhandles, nccl_net_ofi_req_t **req) { return flush(this, n, data, sizes, mhandles, req); }
 	virtual int read_virtual(void* dest, size_t size, void* dest_mhandle, uint64_t src, uint64_t mr_key, nccl_net_ofi_req_t **req) { return read(this, dest, size, dest_mhandle, src, mr_key, req); }
 	virtual ~nccl_net_ofi_recv_comm_t() = default;
 };

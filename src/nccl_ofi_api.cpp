@@ -744,7 +744,7 @@ ncclResult_t nccl_net_ofi_irecv_v9(void* recvComm, int n, void** data,
 		return check_return(ncclInternalError);
 	}
 
-	int ret = recv_comm->recv(recv_comm, n, data, sizes, tags, handles, base_req);
+	int ret = recv_comm->recv(n, data, sizes, tags, handles, base_req);
 	return nccl_net_ofi_retval_translate(ret);
 }
 
@@ -834,7 +834,7 @@ ncclResult_t nccl_net_ofi_iflush_v5(void* rComm, int n, void** buffers, int* siz
 		return check_return(ncclInternalError);
 	}
 
-	int ret = recv_comm->flush(recv_comm, n, buffers, sizes, handles, base_req);
+	int ret = recv_comm->flush(n, buffers, sizes, handles, base_req);
 	return nccl_net_ofi_retval_translate(ret);
 }
 

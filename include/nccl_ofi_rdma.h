@@ -694,6 +694,11 @@ public:
 	int regMr(nccl_ofi_mr_ckey_ref ckey, int type, void **mhandle) override;
 	int deregMr(nccl_net_ofi_mr_handle_t *mhandle) override;
 	int close() override;
+	int recv(int n, void **data, size_t *sizes, int *tags, nccl_net_ofi_mr_handle_t **mhandles, nccl_net_ofi_req_t **req) override;
+	int flush(int n, void **data, int *sizes, nccl_net_ofi_mr_handle_t **mhandles, nccl_net_ofi_req_t **req) override;
+	
+	// Helper member functions
+	int rdma_comm_alloc_flush_req(void *buff, nccl_net_ofi_rdma_mr_handle_t *buff_mr_handle, nccl_net_ofi_rdma_req_t **ret_req);
 };
 
 class nccl_net_ofi_rdma_listen_comm_t : public nccl_net_ofi_listen_comm_t {
