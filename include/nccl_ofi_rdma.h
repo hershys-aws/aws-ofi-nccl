@@ -564,6 +564,13 @@ public:
 
 	/* Sender's control mailbox mr_handle */
 	nccl_net_ofi_rdma_mr_handle_t *ctrl_mr_handle;
+
+	// Methods moved from static functions
+	nccl_net_ofi_rdma_ep_t *get_ep() { return (nccl_net_ofi_rdma_ep_t *)base.ep; }
+	nccl_net_ofi_rdma_send_comm_rail_t *get_control_rail(uint16_t rail_id) {
+		assert(control_rails && rail_id < num_control_rails);
+		return &control_rails[rail_id];
+	}
 };
 
 /*
@@ -669,6 +676,13 @@ public:
 	/* Addr and key of remote control mailbox */
 	uint64_t remote_mailbox_addr;
 	uint64_t remote_mr_key[MAX_NUM_RAILS];
+
+	// Methods moved from static functions
+	nccl_net_ofi_rdma_ep_t *get_ep() { return (nccl_net_ofi_rdma_ep_t *)base.ep; }
+	nccl_net_ofi_rdma_recv_comm_rail_t *get_control_rail(uint16_t rail_id) {
+		assert(control_rails && rail_id < num_control_rails);
+		return &control_rails[rail_id];
+	}
 };
 
 class nccl_net_ofi_rdma_listen_comm_t : public nccl_net_ofi_listen_comm_t {

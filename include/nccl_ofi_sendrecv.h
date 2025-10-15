@@ -15,6 +15,7 @@
 
 // Forward declarations
 struct nccl_net_ofi_sendrecv_req;
+typedef struct nccl_net_ofi_sendrecv_req nccl_net_ofi_sendrecv_req_t;
 class nccl_net_ofi_sendrecv_ep_t;
 class nccl_net_ofi_sendrecv_domain_t;
 
@@ -86,6 +87,9 @@ public:
 	struct fid_ep *local_ep;
 
 	nccl_ofi_cm_send_connector *connector;
+
+	// Methods moved from static functions
+	int free_req(int dev_id, nccl_net_ofi_sendrecv_req_t *req, bool dec_inflight_reqs);
 };
 
 /* Metadata about dummy flush buffer */
@@ -114,6 +118,9 @@ public:
 	nccl_net_ofi_sendrecv_flush_buffer_t flush_buff;
 
 	nccl_ofi_cm_receiver *receiver;
+
+	// Methods moved from static functions
+	int free_req(int dev_id, nccl_net_ofi_sendrecv_req_t *req, bool dec_inflight_reqs);
 };
 
 /* Forward declarations needed for sendrecv transport endpoint type */
