@@ -127,15 +127,13 @@ class nccl_net_ofi_plugin_t;
 
 struct nccl_net_ofi_req;
 struct nccl_net_ofi_comm;
-struct nccl_net_ofi_listen_comm;
-struct nccl_net_ofi_send_comm;
-struct nccl_net_ofi_recv_comm;
+// Forward declarations for classes
+class nccl_net_ofi_listen_comm_t;
+class nccl_net_ofi_send_comm_t;
+class nccl_net_ofi_recv_comm_t;
 
 typedef struct nccl_net_ofi_req nccl_net_ofi_req_t;
 typedef struct nccl_net_ofi_comm nccl_net_ofi_comm_t;
-typedef struct nccl_net_ofi_listen_comm nccl_net_ofi_listen_comm_t;
-typedef struct nccl_net_ofi_send_comm nccl_net_ofi_send_comm_t;
-typedef struct nccl_net_ofi_recv_comm nccl_net_ofi_recv_comm_t;
 
 /**
  * Request - handle for an outstanding non-blocking communication
@@ -769,80 +767,72 @@ struct nccl_net_ofi_comm {
 /**
  * Listen Communicator - Communicator for a listen/accept pairing
  */
-struct nccl_net_ofi_listen_comm {
+class nccl_net_ofi_listen_comm_t {
+public:
 	nccl_net_ofi_comm_t base;
 
+	// Keep existing function pointers for compatibility
 	int (*accept)(nccl_net_ofi_listen_comm_t *listen_comm,
 			       nccl_net_ofi_recv_comm_t **recv_comm);
 	int (*close)(nccl_net_ofi_listen_comm_t *listen_comm);
+
+	// Add virtual methods for future use
+	virtual int accept_virtual(nccl_net_ofi_recv_comm_t **recv_comm) { return accept(this, recv_comm); }
+	virtual int close_virtual() { return close(this); }
+	virtual ~nccl_net_ofi_listen_comm_t() = default;
 };
 
-struct nccl_net_ofi_send_comm {
+class nccl_net_ofi_send_comm_t {
+public:
 	nccl_net_ofi_comm_t base;
 	// TODO: Potentially store this here: int trafficClass;
 
-	/*
-	 * @brief	Register memory region on send communicator (both Host and CUDA)
-	 *
-	 * @return	Memory handle for data send operations
-	 * @return	0 on success
-	 *		non-zero on error
-	 */
+	// Keep existing function pointers for compatibility
 	int (*regMr)(nccl_net_ofi_send_comm_t *send_comm, nccl_ofi_mr_ckey_ref ckey, int type,
 				 void **mhandle);
-
-	/*
-	 * @brief	Deregister memory region on send communicator (both Host and CUDA)
-	 *
-	 * @return	Memory handle for data send operations
-	 * @return	0 on success
-	 *		non-zero on error
-	 */
 	int (*deregMr)(nccl_net_ofi_send_comm_t *send_comm, nccl_net_ofi_mr_handle_t *mhandle);
-
 	int (*send)(nccl_net_ofi_send_comm_t *send_comm, void *data, size_t size, int tag,
 			     nccl_net_ofi_mr_handle_t *mhandle, nccl_net_ofi_req_t **req);
-
 	int (*close)(nccl_net_ofi_send_comm_t *send_comm);
-
 	int (*write)(nccl_net_ofi_send_comm_t *send_comm, void* src, size_t size, void* src_mhandle,
 		     uint64_t dest, uint64_t mr_key, nccl_net_ofi_req_t **req);
 	int (*write_inline)(nccl_net_ofi_send_comm_t *, void* src, size_t size,
 			    uint64_t dest, uint64_t mr_key, nccl_net_ofi_req_t **request);
+
+	// Add virtual methods for future use
+	virtual int regMr_virtual(nccl_ofi_mr_ckey_ref ckey, int type, void **mhandle) { return regMr(this, ckey, type, mhandle); }
+	virtual int deregMr_virtual(nccl_net_ofi_mr_handle_t *mhandle) { return deregMr(this, mhandle); }
+	virtual int send_virtual(void *data, size_t size, int tag, nccl_net_ofi_mr_handle_t *mhandle, nccl_net_ofi_req_t **req) { return send(this, data, size, tag, mhandle, req); }
+	virtual int close_virtual() { return close(this); }
+	virtual int write_virtual(void* src, size_t size, void* src_mhandle, uint64_t dest, uint64_t mr_key, nccl_net_ofi_req_t **req) { return write(this, src, size, src_mhandle, dest, mr_key, req); }
+	virtual int write_inline_virtual(void* src, size_t size, uint64_t dest, uint64_t mr_key, nccl_net_ofi_req_t **request) { return write_inline(this, src, size, dest, mr_key, request); }
+	virtual ~nccl_net_ofi_send_comm_t() = default;
 };
 
-struct nccl_net_ofi_recv_comm {
+class nccl_net_ofi_recv_comm_t {
+public:
 	nccl_net_ofi_comm_t base;
 
-	/*
-	 * @brief	Register memory region on recv communicator (both Host and CUDA)
-	 *
-	 * @return	Memory handle for data recv operations
-	 * @return	0 on success
-	 *		non-zero on error
-	 */
+	// Keep existing function pointers for compatibility
 	int (*regMr)(nccl_net_ofi_recv_comm_t *recv_comm, nccl_ofi_mr_ckey_ref ckey, int type,
 				 void **mhandle);
-
-	/*
-	 * @brief	Deregister memory region on recv communicator (both Host and CUDA)
-	 *
-	 * @return	Memory handle for data recv operations
-	 * @return	0 on success
-	 *		non-zero on error
-	 */
 	int (*deregMr)(nccl_net_ofi_recv_comm_t *recv_comm, nccl_net_ofi_mr_handle_t *mhandle);
-
 	int (*recv)(nccl_net_ofi_recv_comm_t *recv_comm, int n, void **data, size_t *sizes, int *tags,
 			     nccl_net_ofi_mr_handle_t **mhandles, nccl_net_ofi_req_t **req);
-
 	int (*flush)(nccl_net_ofi_recv_comm_t *recv_comm, int n, void **data, int *sizes,
 			      nccl_net_ofi_mr_handle_t **mhandles, nccl_net_ofi_req_t **req);
-
 	int (*close)(nccl_net_ofi_recv_comm_t *recv_comm);
-
 	int (*read)(nccl_net_ofi_recv_comm_t *recv_comm, void* dest, size_t size, void* dest_mhandle,
 		    uint64_t src, uint64_t mr_key, nccl_net_ofi_req_t **req);
+
+	// Add virtual methods for future use
+	virtual int regMr_virtual(nccl_ofi_mr_ckey_ref ckey, int type, void **mhandle) { return regMr(this, ckey, type, mhandle); }
+	virtual int deregMr_virtual(nccl_net_ofi_mr_handle_t *mhandle) { return deregMr(this, mhandle); }
+	virtual int recv_virtual(int n, void **data, size_t *sizes, int *tags, nccl_net_ofi_mr_handle_t **mhandles, nccl_net_ofi_req_t **req) { return recv(this, n, data, sizes, tags, mhandles, req); }
+	virtual int flush_virtual(int n, void **data, int *sizes, nccl_net_ofi_mr_handle_t **mhandles, nccl_net_ofi_req_t **req) { return flush(this, n, data, sizes, mhandles, req); }
+	virtual int close_virtual() { return close(this); }
+	virtual int read_virtual(void* dest, size_t size, void* dest_mhandle, uint64_t src, uint64_t mr_key, nccl_net_ofi_req_t **req) { return read(this, dest, size, dest_mhandle, src, mr_key, req); }
+	virtual ~nccl_net_ofi_recv_comm_t() = default;
 };
 
 /**

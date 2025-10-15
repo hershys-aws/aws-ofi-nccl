@@ -515,11 +515,12 @@ typedef struct nccl_net_ofi_rdma_send_comm_rail {
  * Use function `calloc_rdma_send_comm(int num_rails, int num_control_rails)' to
  * allocate a RDMA send communicator with `num_rails'+`num_control_rails' rails.
  */
-typedef struct nccl_net_ofi_rdma_send_comm {
+class nccl_net_ofi_rdma_send_comm_t : public nccl_net_ofi_send_comm_t {
+public:
 	/* This base send communicator must be the first member of this
 	 * struct. This allows casting between pointers of this struct
 	 * and its base struct. */
-	nccl_net_ofi_send_comm_t base;
+	// Note: base is inherited from nccl_net_ofi_send_comm_t
 
 	uint64_t num_inflight_reqs;
 	uint64_t num_inflight_writes;
@@ -563,7 +564,7 @@ typedef struct nccl_net_ofi_rdma_send_comm {
 
 	/* Sender's control mailbox mr_handle */
 	nccl_net_ofi_rdma_mr_handle_t *ctrl_mr_handle;
-} nccl_net_ofi_rdma_send_comm_t;
+};
 
 /*
  * @brief	Receive communicator rail
@@ -600,11 +601,12 @@ typedef struct nccl_net_ofi_rdma_flush_buffer {
  * Use function `calloc_rdma_recv_comm(int num_rails, int num_control_rails)' to
  * allocate a RDMA receive communicator with `num_rails'+`num_control_rails' rails.
  */
-typedef struct nccl_net_ofi_rdma_recv_comm {
+class nccl_net_ofi_rdma_recv_comm_t : public nccl_net_ofi_recv_comm_t {
+public:
 	/* This base receive communicator must be the first member of
 	 * this struct. This allows casting between pointers of this
 	 * struct and its base struct. */
-	nccl_net_ofi_recv_comm_t base;
+	// Note: base is inherited from nccl_net_ofi_recv_comm_t
 
 	/* CM receiver for connection establishment */
 	nccl_ofi_cm_receiver *receiver;
@@ -667,13 +669,14 @@ typedef struct nccl_net_ofi_rdma_recv_comm {
 	/* Addr and key of remote control mailbox */
 	uint64_t remote_mailbox_addr;
 	uint64_t remote_mr_key[MAX_NUM_RAILS];
-} nccl_net_ofi_rdma_recv_comm_t;
+};
 
-typedef struct nccl_net_ofi_rdma_listen_comm {
+class nccl_net_ofi_rdma_listen_comm_t : public nccl_net_ofi_listen_comm_t {
+public:
 	/* This base listen communicator must be the first member of
 	 * this struct. This allows casting between pointers of this
 	 * struct and its base struct. */
-	nccl_net_ofi_listen_comm_t base;
+	// Note: base is inherited from nccl_net_ofi_listen_comm_t
 
 	/* Associated listener from connection manager */
 	nccl_ofi_cm_listener *listener;
@@ -683,7 +686,7 @@ typedef struct nccl_net_ofi_rdma_listen_comm {
 
 	/* Stage of connection establishment on listen side */
 	nccl_ofi_comm_stage_t stage;
-} nccl_net_ofi_rdma_listen_comm_t;
+};
 
 
 class nccl_net_ofi_rdma_domain_rail_t {

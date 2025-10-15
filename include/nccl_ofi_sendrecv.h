@@ -13,6 +13,11 @@
 #include "nccl_ofi_log.h"
 #include "ofi/resource_wrapper.h"
 
+// Forward declarations
+struct nccl_net_ofi_sendrecv_req;
+class nccl_net_ofi_sendrecv_ep_t;
+class nccl_net_ofi_sendrecv_domain_t;
+
 /* This is the initial value of mr_key. At key deregisteration time,
  * it is used to validate if a key was generated and needed to be freed or not.
  */
@@ -50,11 +55,12 @@ public:
 	ofi_mr_ptr mr;
 };
 
-typedef struct nccl_net_ofi_sendrecv_listen_comm {
+class nccl_net_ofi_sendrecv_listen_comm_t : public nccl_net_ofi_listen_comm_t {
+public:
 	/* This base listen communicator must be the first member of
 	 * this struct. This allows casting between pointers of this
 	 * struct and its base struct. */
-	nccl_net_ofi_listen_comm_t base;
+	// Note: base is inherited from nccl_net_ofi_listen_comm_t
 
 	struct fid_ep *local_ep;
 	fi_addr_t local_ep_addr;
@@ -62,13 +68,14 @@ typedef struct nccl_net_ofi_sendrecv_listen_comm {
 	save_comm_state_t state;
 
 	nccl_ofi_cm_listener *listener;
-} nccl_net_ofi_sendrecv_listen_comm_t;
+};
 
-typedef struct nccl_net_ofi_sendrecv_send_comm {
+class nccl_net_ofi_sendrecv_send_comm_t : public nccl_net_ofi_send_comm_t {
+public:
 	/* This base send communicator must be the first member of this
 	 * struct. This allows casting between pointers of this struct
 	 * and its base struct. */
-	nccl_net_ofi_send_comm_t base;
+	// Note: base is inherited from nccl_net_ofi_send_comm_t
 
 	uint64_t num_inflight_reqs;
 	nccl_ofi_freelist_t *nccl_ofi_reqs_fl;
@@ -79,7 +86,7 @@ typedef struct nccl_net_ofi_sendrecv_send_comm {
 	struct fid_ep *local_ep;
 
 	nccl_ofi_cm_send_connector *connector;
-} nccl_net_ofi_sendrecv_send_comm_t;
+};
 
 /* Metadata about dummy flush buffer */
 typedef struct nccl_net_ofi_sendrecv_flush_buffer {
@@ -89,11 +96,12 @@ typedef struct nccl_net_ofi_sendrecv_flush_buffer {
 	nccl_net_ofi_sendrecv_mr_handle_t *mr_handle;
 } nccl_net_ofi_sendrecv_flush_buffer_t;
 
-typedef struct nccl_net_ofi_sendrecv_recv_comm {
+class nccl_net_ofi_sendrecv_recv_comm_t : public nccl_net_ofi_recv_comm_t {
+public:
 	/* This base receive communicator must be the first member of
 	 * this struct. This allows casting between pointers of this
 	 * struct and its base struct. */
-	nccl_net_ofi_recv_comm_t base;
+	// Note: base is inherited from nccl_net_ofi_recv_comm_t
 
 	uint64_t num_inflight_reqs;
 	nccl_ofi_freelist_t *nccl_ofi_reqs_fl;
@@ -106,7 +114,7 @@ typedef struct nccl_net_ofi_sendrecv_recv_comm {
 	nccl_net_ofi_sendrecv_flush_buffer_t flush_buff;
 
 	nccl_ofi_cm_receiver *receiver;
-} nccl_net_ofi_sendrecv_recv_comm_t;
+};
 
 /* Forward declarations needed for sendrecv transport endpoint type */
 class nccl_net_ofi_sendrecv_device_t;
