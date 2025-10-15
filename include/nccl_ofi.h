@@ -793,15 +793,10 @@ public:
 	virtual int send(void *data, size_t size, int tag, nccl_net_ofi_mr_handle_t *mhandle, nccl_net_ofi_req_t **req) = 0;
 	virtual int close() = 0;
 	
-	// Keep existing function pointers for compatibility
-	int (*write)(nccl_net_ofi_send_comm_t *send_comm, void* src, size_t size, void* src_mhandle,
-		     uint64_t dest, uint64_t mr_key, nccl_net_ofi_req_t **req);
-	int (*write_inline)(nccl_net_ofi_send_comm_t *, void* src, size_t size,
-			    uint64_t dest, uint64_t mr_key, nccl_net_ofi_req_t **request);
-
-	// Add virtual methods for future use
-	virtual int write_virtual(void* src, size_t size, void* src_mhandle, uint64_t dest, uint64_t mr_key, nccl_net_ofi_req_t **req) { return write(this, src, size, src_mhandle, dest, mr_key, req); }
-	virtual int write_inline_virtual(void* src, size_t size, uint64_t dest, uint64_t mr_key, nccl_net_ofi_req_t **request) { return write_inline(this, src, size, dest, mr_key, request); }
+	// Pure virtual methods
+	virtual int write(void* src, size_t size, void* src_mhandle, uint64_t dest, uint64_t mr_key, nccl_net_ofi_req_t **req) = 0;
+	virtual int write_inline(void* src, size_t size, uint64_t dest, uint64_t mr_key, nccl_net_ofi_req_t **request) = 0;
+	
 	virtual ~nccl_net_ofi_send_comm_t() = default;
 };
 

@@ -5915,14 +5915,14 @@ static int rma_write_impl(nccl_net_ofi_send_comm_t *send_comm, void* src, size_t
  *       	the application
  */
 
-static int rma_write(nccl_net_ofi_send_comm_t *send_comm, void* src, size_t size, void* mhandle,
+int nccl_net_ofi_rdma_send_comm_t::write(void* src, size_t size, void* mhandle,
 		     uint64_t dest, uint64_t mr_key, nccl_net_ofi_req_t ** base_req)
 {
 	nccl_net_ofi_rdma_mr_handle_t *mr_handle = (nccl_net_ofi_rdma_mr_handle_t *)mhandle;
 	struct fid_mr *rail_mr_handle = mr_handle->mr[0].get();
 	void *desc = fi_mr_desc(rail_mr_handle);
 	uint64_t flags = 0;
-	return rma_write_impl(send_comm, src, size, desc, dest, mr_key, flags, base_req);
+	return rma_write_impl(this, src, size, desc, dest, mr_key, flags, base_req);
 }
 
 /**
@@ -5930,12 +5930,12 @@ static int rma_write(nccl_net_ofi_send_comm_t *send_comm, void* src, size_t size
  *       	the application
  */
 
-static int rma_write_inline(nccl_net_ofi_send_comm_t *send_comm, void* src, size_t size,
+int nccl_net_ofi_rdma_send_comm_t::write_inline(void* src, size_t size,
 			  uint64_t dest, uint64_t mr_key, nccl_net_ofi_req_t ** base_req)
 {
 	void * desc = NULL;
 	uint64_t flags = FI_INJECT;
-	return rma_write_impl(send_comm, src, size, desc, dest, mr_key, flags, base_req);
+	return rma_write_impl(this, src, size, desc, dest, mr_key, flags, base_req);
 }
 
 
@@ -5971,8 +5971,8 @@ int nccl_net_ofi_rdma_ep_t::create_send_comm(nccl_net_ofi_rdma_send_comm_t **s_c
 	ret_s_comm->base.dev_id = dev_id;
 
 
-	ret_s_comm->write = rma_write;
-	ret_s_comm->write_inline = rma_write_inline;
+
+
 
 	ret_s_comm->comm_active = true;
 

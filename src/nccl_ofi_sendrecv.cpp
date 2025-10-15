@@ -1779,6 +1779,20 @@ int nccl_net_ofi_sendrecv_send_comm_t::send(void *data, size_t size, int msg_tag
 	return ret;
 }
 
+int nccl_net_ofi_sendrecv_send_comm_t::write(void* src, size_t size, void* src_mhandle,
+		     uint64_t dest, uint64_t mr_key, nccl_net_ofi_req_t **req)
+{
+	NCCL_OFI_WARN("Protocol does not support iwrite API function");
+	return -EINVAL;
+}
+
+int nccl_net_ofi_sendrecv_send_comm_t::write_inline(void* src, size_t size,
+			    uint64_t dest, uint64_t mr_key, nccl_net_ofi_req_t **request)
+{
+	NCCL_OFI_WARN("Protocol does not support iwriteInline API function");
+	return -EINVAL;
+}
+
 int nccl_net_ofi_sendrecv_send_comm_t::close()
 {
 	int ret = 0;
@@ -1857,8 +1871,8 @@ static inline int sendrecv_send_comm_create(nccl_net_ofi_conn_handle_t *handle,
 
 
 
-	ret_s_comm->write = NULL;
-	ret_s_comm->write_inline = NULL;
+
+
 	ret_s_comm->tag = 0; /* Populate later from connect response */
 	ret_s_comm->local_ep = ep->ofi_ep.get();
 
