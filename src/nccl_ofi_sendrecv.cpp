@@ -1386,23 +1386,19 @@ static nccl_ofi_connection_info_t sendrecv_prepare_conn_resp_msg
 }
 
 
-static int sendrecv_listen_comm_accept(nccl_net_ofi_listen_comm_t *listen_comm,
-				       nccl_net_ofi_recv_comm_t **recv_comm)
+int nccl_net_ofi_sendrecv_listen_comm_t::accept(nccl_net_ofi_recv_comm_t **recv_comm)
 {
 	int ret = 0;
-
-	nccl_net_ofi_sendrecv_listen_comm_t *l_comm =
-		(nccl_net_ofi_sendrecv_listen_comm_t *)listen_comm;
 
 	*recv_comm = NULL;
 
 	/* Extract communicator state from listen communicator object */
-	save_comm_state_t *comm_state = &l_comm->state;
+	save_comm_state_t *comm_state = &this->state;
 	auto r_comm = reinterpret_cast<nccl_net_ofi_sendrecv_recv_comm_t *>(comm_state->comm);
 
 	/* Retrieve and validate endpoint */
 	nccl_net_ofi_sendrecv_ep_t *ep =
-		(nccl_net_ofi_sendrecv_ep_t *)l_comm->base.ep;
+		(nccl_net_ofi_sendrecv_ep_t *)this->base.ep;
 	if (OFI_UNLIKELY(ep == NULL)) {
 		ret = -EINVAL;
 		NCCL_OFI_WARN("Invalid endpoint provided");
@@ -1452,7 +1448,7 @@ static int sendrecv_listen_comm_accept(nccl_net_ofi_listen_comm_t *listen_comm,
 		}
 
 		/* Check for pending receivers */
-		receiver = l_comm->listener->accept();
+		receiver = this->listener->accept();
 
 		if (receiver == nullptr) {
 			/* No pending connections */
@@ -1467,7 +1463,7 @@ static int sendrecv_listen_comm_accept(nccl_net_ofi_listen_comm_t *listen_comm,
 		}
 
 		/* Prepare receive communicator object for the received peer connection */
-		r_comm = sendrecv_recv_comm_prepare(l_comm, device, domain, ep, conn_msg->ep_name);
+		r_comm = sendrecv_recv_comm_prepare(this, device, domain, ep, conn_msg->ep_name);
 		if (OFI_UNLIKELY(r_comm == NULL)) {
 			return -ENOMEM;
 		}
@@ -1540,19 +1536,17 @@ static int sendrecv_listen_comm_accept(nccl_net_ofi_listen_comm_t *listen_comm,
 	return ret;
 }
 
-static int sendrecv_listen_comm_close(nccl_net_ofi_listen_comm_t *listen_comm)
+int nccl_net_ofi_sendrecv_listen_comm_t::close()
 {
-	nccl_net_ofi_sendrecv_listen_comm_t *l_comm =
-		(nccl_net_ofi_sendrecv_listen_comm_t *)listen_comm;
 	int ret = 0;
 
-	if (l_comm->listener) {
-		delete l_comm->listener;
-		l_comm->listener = nullptr;
+	if (this->listener) {
+		delete this->listener;
+		this->listener = nullptr;
 	}
 
 	/* Retrieve and validate endpoint */
-	nccl_net_ofi_ep_t *ep = l_comm->base.ep;
+	nccl_net_ofi_ep_t *ep = this->base.ep;
 	if (OFI_UNLIKELY(ep == NULL)) {
 		ret = -EINVAL;
 		NCCL_OFI_WARN("Invalid endpoint provided");
@@ -1560,7 +1554,7 @@ static int sendrecv_listen_comm_close(nccl_net_ofi_listen_comm_t *listen_comm)
 	}
 
 	ret = ep->release_ep(false, false);
-	free(listen_comm);
+	free(this);
  exit:
 	return ret;
 }
@@ -1648,8 +1642,6 @@ int nccl_net_ofi_sendrecv_ep_t::listen(nccl_net_ofi_conn_handle_t *handle,
 	l_comm->base.type = NCCL_NET_OFI_LISTEN_COMM;
 	l_comm->base.ep = this;
 	l_comm->base.dev_id = dev_id;
-	l_comm->accept = sendrecv_listen_comm_accept;
-	l_comm->close = sendrecv_listen_comm_close;
 	l_comm->local_ep = this->ofi_ep.get();
 	l_comm->local_ep_addr = local_ep_addr;
 

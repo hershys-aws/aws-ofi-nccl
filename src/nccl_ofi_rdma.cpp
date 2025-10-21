@@ -4620,23 +4620,19 @@ exit:
 }
 
 
-static int accept(nccl_net_ofi_listen_comm_t *listen_comm,
-			   nccl_net_ofi_recv_comm_t **recv_comm)
+int nccl_net_ofi_rdma_listen_comm_t::accept(nccl_net_ofi_recv_comm_t **recv_comm)
 {
 	int ret = 0;
 
-	nccl_net_ofi_rdma_listen_comm_t *l_comm =
-		(nccl_net_ofi_rdma_listen_comm_t *)listen_comm;
-
 	/* Extract communicator state from listen communicator object */
-	nccl_net_ofi_rdma_recv_comm_t *r_comm = l_comm->r_comm;
+	nccl_net_ofi_rdma_recv_comm_t *r_comm = this->r_comm;
 
 	/* Retrieve and validate endpoint */
-	nccl_net_ofi_rdma_ep_t *l_comm_ep = (nccl_net_ofi_rdma_ep_t *)l_comm->base.ep;
+	nccl_net_ofi_rdma_ep_t *l_comm_ep = (nccl_net_ofi_rdma_ep_t *)this->base.ep;
 	assert(l_comm_ep != NULL);
 
 	nccl_net_ofi_rdma_ep_t *ep = NULL;
-	if (l_comm->r_comm) {
+	if (this->r_comm) {
 		ep = (nccl_net_ofi_rdma_ep_t *)r_comm->base.ep;
 		assert(ep != NULL);
 	}
@@ -4659,10 +4655,10 @@ static int accept(nccl_net_ofi_listen_comm_t *listen_comm,
 	 * to the next one until failure. This is to ensure we make maximum
 	 * progress in a single function invocation.
 	 */
-	switch (l_comm->stage) {
+	switch (this->stage) {
 	case COMM_CREATE_START:
 
-		l_comm->stage = COMM_CONN_REQ_PENDING;
+		this->stage = COMM_CONN_REQ_PENDING;
 
 		fallthrough;
 	case COMM_CONN_REQ_PENDING:
@@ -4673,7 +4669,7 @@ static int accept(nccl_net_ofi_listen_comm_t *listen_comm,
 
 		assert(r_comm == nullptr);
 
-		ret = accept_wait_for_connection(domain, l_comm, &r_comm);
+		ret = accept_wait_for_connection(domain, this, &r_comm);
 		if (ret != 0) {
 			goto exit;
 		} else if (r_comm == nullptr) {
@@ -4684,7 +4680,7 @@ static int accept(nccl_net_ofi_listen_comm_t *listen_comm,
 		ep = (nccl_net_ofi_rdma_ep_t *)r_comm->base.ep;
 		assert(ep != NULL);
 
-		l_comm->stage = COMM_CONN_RESP_REQ_PENDING;
+		this->stage = COMM_CONN_RESP_REQ_PENDING;
 
 		fallthrough;
 	case COMM_CONN_RESP_REQ_PENDING:
@@ -4721,16 +4717,16 @@ static int accept(nccl_net_ofi_listen_comm_t *listen_comm,
 		/* NULL pointer to recv communicator stored in listen
 		 * communicator's state to avoid that `close_listen_recv_comm'
 		 * deallocates the receive communicator */
-		l_comm->r_comm = NULL;
+		this->r_comm = NULL;
 
-		l_comm->stage = COMM_CONNECTED;
+		this->stage = COMM_CONNECTED;
 
 		break;
 
 	case COMM_CONNECTED:
 	default:
 		NCCL_OFI_WARN("Invalid state of receive communicator object: %d",
-			      l_comm->stage);
+			      this->stage);
 		ret = -EINVAL;
 	}
 
@@ -4738,44 +4734,41 @@ static int accept(nccl_net_ofi_listen_comm_t *listen_comm,
 	++num_open_comms;
 	nccl_net_ofi_mutex_unlock(&comm_cleanup_list_lock);
 
-	/* Reset l_comm stage for the next accept() */
-	l_comm->stage = { };
+	/* Reset stage for the next accept() */
+	this->stage = { };
 
  exit:;
 	/* Close receive communicator in case listen operation failed
 	   close_listen_recv_comm will take the domain lock in case of an error,
 	   so unlock it here .*/
 	lock.unlock();
-	int close_ret = close_listen_recv_comm(l_comm);
+	int close_ret = close_listen_recv_comm(this);
 	if (close_ret) {
 		NCCL_OFI_WARN("Failed to close listen communicator");
 	}
 	return ret ? ret : close_ret;
 }
 
-static int listen_close(nccl_net_ofi_listen_comm_t *listen_comm)
+int nccl_net_ofi_rdma_listen_comm_t::close()
 {
-	nccl_net_ofi_rdma_listen_comm_t *l_comm =
-		(nccl_net_ofi_rdma_listen_comm_t *)listen_comm;
-
 	int ret = 0;
 
 	/* Retrieve and validate endpoint */
-	nccl_net_ofi_ep_t *ep = l_comm->base.ep;
+	nccl_net_ofi_ep_t *ep = this->base.ep;
 	assert(ep != NULL);
 
-	if (l_comm->r_comm) {
-		ret = recv_comm_destroy(l_comm->r_comm);
+	if (this->r_comm) {
+		ret = recv_comm_destroy(this->r_comm);
 		if (ret != 0) {
 			NCCL_OFI_WARN("Unable to close receive communicator stored in listen communicator. Leaking memory.");
 			return ret;
 		}
 	}
 
-	delete l_comm->listener;
-	l_comm->listener = nullptr;
+	delete this->listener;
+	this->listener = nullptr;
 
-	free(l_comm);
+	free(this);
 	ret = ep->release_ep(false, false);
 
 	return ret;
@@ -4820,8 +4813,6 @@ int nccl_net_ofi_rdma_ep_t::listen(nccl_net_ofi_conn_handle_t *handle,
 	l_comm->base.type = NCCL_NET_OFI_LISTEN_COMM;
 	l_comm->base.ep = this;
 	l_comm->base.dev_id = dev_id;
-	l_comm->accept = accept;
-	l_comm->close = listen_close;
 
 	/* Create CM listener */
 	l_comm->listener = domain_ptr->cm->listen();

@@ -718,6 +718,9 @@ public:
 
 	/* Stage of connection establishment on listen side */
 	nccl_ofi_comm_stage_t stage;
+
+	int accept(nccl_net_ofi_recv_comm_t **recv_comm) override;
+	int close() override;
 };
 
 

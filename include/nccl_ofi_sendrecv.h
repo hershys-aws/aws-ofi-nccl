@@ -69,6 +69,9 @@ public:
 	save_comm_state_t state;
 
 	nccl_ofi_cm_listener *listener;
+
+	int accept(nccl_net_ofi_recv_comm_t **recv_comm) override;
+	int close() override;
 };
 
 class nccl_net_ofi_sendrecv_send_comm_t : public nccl_net_ofi_send_comm_t {
