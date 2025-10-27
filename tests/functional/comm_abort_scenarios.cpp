@@ -1,628 +1,614 @@
 /*
- * Copyright (c) 2018 Amazon.com, Inc. or its affiliates. All rights reserved.
+ * Copyright (c) 2025 Amazon.com, Inc. or its affiliates. All rights reserved.
  */
 
-/*
- * This test validates functionality of NCCL communicator abort scenarios
- * Tests graceful handling of communicator termination at various lifecycle stages
- * and validates that other communicators remain functional after abort scenarios
+/**
+ * Tests closing a communicator while there are still inflight requests
+ * with support for multiple communicators and multiple threads
  */
 
 #include "config.h"
 
+#include <algorithm>
+#include <vector>
+#include <pthread.h>
+#include <atomic>
+#include <chrono>
+#include <thread>
+#include <array>
+#include <string>
+#include <iostream>
+
 #include "test-common.h"
 
-#define MAX_TEST_COMMS 4
+#if HAVE_CUDA
+#include <cuda_runtime.h>
 
-struct multi_comm_context {
-	nccl_net_ofi_send_comm_t *sComms[MAX_TEST_COMMS];
-	nccl_net_ofi_recv_comm_t *rComms[MAX_TEST_COMMS];
-	nccl_net_ofi_listen_comm_t *lComms[MAX_TEST_COMMS];
-	test_nccl_net_device_handle_t *s_handles[MAX_TEST_COMMS];
-	test_nccl_net_device_handle_t *r_handles[MAX_TEST_COMMS];
-	int active_comm_count;
-	int device_id;
+// Global variables for CUDA initialization (calculated once, used by all threads)
+static int g_local_rank = -1;
+static int g_cuda_device = -1;
+
+// Calculate local rank once (thread-safe, called before threading starts)
+static bool calculate_local_rank_and_cuda_device() {
+	int rank, num_ranks, local_rank = 0;
+	char name[MPI_MAX_PROCESSOR_NAME];
+	int proc_name_len;
+
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+	MPI_Comm_size(MPI_COMM_WORLD, &num_ranks);
+	MPI_Get_processor_name(name, &proc_name_len);
+
+	// Get all processor names to determine local rank
+	char *all_proc_name = (char *)malloc(sizeof(char) * num_ranks * MPI_MAX_PROCESSOR_NAME);
+	if (!all_proc_name) {
+		fprintf(stderr, "Failed to allocate memory for processor names\n");
+		return false;
+	}
+
+	MPI_Allgather(name, MPI_MAX_PROCESSOR_NAME, MPI_CHAR, all_proc_name,
+		MPI_MAX_PROCESSOR_NAME, MPI_CHAR, MPI_COMM_WORLD);
+
+	// Determine local rank (same logic as nccl_message_transfer.cpp)
+	for (int i = 0; i < num_ranks; i++) {
+		if (!strcmp(name, &all_proc_name[i * MPI_MAX_PROCESSOR_NAME])) {
+			if (i < rank) {
+				++local_rank;
+			}
+		}
+	}
+	free(all_proc_name);
+
+	// Query CUDA device count
+	int device_count = 0;
+	cudaError_t result = cudaGetDeviceCount(&device_count);
+	if (result != cudaSuccess) {
+		fprintf(stderr, "CUDA runtime initialization failed: %s\n", cudaGetErrorString(result));
+		return false;
+	}
+
+	if (device_count == 0) {
+		fprintf(stderr, "No CUDA devices found\n");
+		return false;
+	}
+
+	// Store global values
+	g_local_rank = local_rank;
+	g_cuda_device = local_rank % device_count;
+
+	NCCL_OFI_INFO(NCCL_INIT, "Calculated CUDA device %d for memory allocation (local_rank=%d)", g_cuda_device, g_local_rank);
+	return true;
+}
+
+// Initialize CUDA runtime for worker thread (thread-safe, per-thread context)
+static bool initialize_cuda_for_thread() {
+	// Each thread needs its own CUDA context, so don't use global flag
+	// Set device based on pre-calculated values
+	cudaError_t result = cudaSetDevice(g_cuda_device);
+	if (result != cudaSuccess) {
+		fprintf(stderr, "Failed to set CUDA device %d: %s\n", g_cuda_device, cudaGetErrorString(result));
+		return false;
+	}
+
+	// Force context creation by doing a simple CUDA operation
+	void* dummy_ptr = nullptr;
+	result = cudaMalloc(&dummy_ptr, 1);
+	if (result == cudaSuccess && dummy_ptr) {
+		cudaFree(dummy_ptr);
+	} else {
+		fprintf(stderr, "Failed to create CUDA context on device %d: %s\n", g_cuda_device, cudaGetErrorString(result));
+		return false;
+	}
+
+	NCCL_OFI_INFO(NCCL_INIT, "Using CUDA device %d for memory allocation (local_rank=%d)", g_cuda_device, g_local_rank);
+	return true;
+}
+#endif
+
+#define PROC_NAME_IDX(i) (i * MPI_MAX_PROCESSOR_NAME)
+
+#define RESTART_ITERS 10
+
+// Default parameters - can be overridden via command line or environment
+static size_t MAX_TEST_COMMS = 2;
+static size_t MAX_TEST_THREADS = 2;
+
+class MultiCommAbortContext {
+private:
+	std::vector<nccl_net_ofi_send_comm_t*> send_comms;
+	std::vector<nccl_net_ofi_recv_comm_t*> recv_comms;
+	std::vector<nccl_net_ofi_listen_comm_t*> listen_comms;
+	std::vector<test_nccl_net_device_handle_t*> send_handles;
+	std::vector<test_nccl_net_device_handle_t*> recv_handles;
+	std::vector<std::array<char, NCCL_NET_HANDLE_MAXSIZE>> src_handles;
+	std::vector<std::array<char, NCCL_NET_HANDLE_MAXSIZE>> handles;
+	size_t active_comm_count{0};
+	int device_id{0};
+
+public:
+	MultiCommAbortContext()
+		: send_comms(MAX_TEST_COMMS, nullptr)
+		, recv_comms(MAX_TEST_COMMS, nullptr)
+		, listen_comms(MAX_TEST_COMMS, nullptr)
+		, send_handles(MAX_TEST_COMMS, nullptr)
+		, recv_handles(MAX_TEST_COMMS, nullptr)
+		, src_handles(MAX_TEST_COMMS)
+		, handles(MAX_TEST_COMMS)
+	{}
+
+	ncclResult_t create_communicator_pair(test_nccl_net_t* ext_net, size_t comm_idx,
+		int rank, int dev, int thread_id) {
+		// Unique tags across all threads and communicators
+		int base_tag = (thread_id * static_cast<int>(MAX_TEST_COMMS) * 2) + (static_cast<int>(comm_idx) * 2);
+
+		NCCL_OFI_INFO(NCCL_INIT, "RANK %d THREAD %d: create_communicator_pair comm %zu, dev %d, base_tag %d",
+			rank, thread_id, comm_idx, dev, base_tag);
+
+		// Listen
+		ncclResult_t listen_result = ext_net->listen(dev, static_cast<void*>(&handles[comm_idx]),
+			reinterpret_cast<void**>(&listen_comms[comm_idx]));
+		if (listen_result != ncclSuccess) {
+			NCCL_OFI_WARN("RANK %d THREAD %d: Failed to create listen communicator for comm %zu on device %d: %d",
+				rank, thread_id, comm_idx, dev, listen_result);
+			return ncclInternalError;
+		}
+
+		// Exchange handles
+		if (rank == 0) {
+			MPI_Send(&handles[comm_idx], NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, 1, base_tag, MPI_COMM_WORLD);
+			MPI_Recv(src_handles[comm_idx].data(), NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, 1, base_tag + 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+		} else {
+			MPI_Recv(src_handles[comm_idx].data(), NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, 0, base_tag, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+			MPI_Send(handles[comm_idx].data(), NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, 0, base_tag + 1, MPI_COMM_WORLD);
+		}
+
+		// Connect and Accept
+		while (!send_comms[comm_idx] || !recv_comms[comm_idx]) {
+			if (!send_comms[comm_idx]) {
+				ext_net->connect(dev, static_cast<void*>(src_handles[comm_idx].data()),
+					reinterpret_cast<void**>(&send_comms[comm_idx]), &send_handles[comm_idx]);
+			}
+			if (!recv_comms[comm_idx]) {
+				ext_net->accept(static_cast<void*>(listen_comms[comm_idx]),
+					reinterpret_cast<void**>(&recv_comms[comm_idx]), &recv_handles[comm_idx]);
+			}
+		}
+
+		active_comm_count++;
+		return ncclSuccess;
+	}
+
+	ncclResult_t test_inflight_abort(test_nccl_net_t* ext_net, int buffer_type, int rank) {
+		if (!ext_net || active_comm_count == 0) return ncclSuccess;
+
+		const size_t send_size = 1024 * 1024;
+		const size_t recv_size = 1024 * 1024;
+		const int nrecv = NCCL_OFI_MAX_RECVS;
+
+		std::vector<std::vector<nccl_net_ofi_req_t*>> send_reqs(active_comm_count, std::vector<nccl_net_ofi_req_t*>(NUM_REQUESTS, nullptr));
+		std::vector<std::vector<nccl_net_ofi_req_t*>> recv_reqs(active_comm_count, std::vector<nccl_net_ofi_req_t*>(NUM_REQUESTS, nullptr));
+		std::vector<std::vector<void*>> send_mhandles(active_comm_count, std::vector<void*>(NUM_REQUESTS, nullptr));
+		std::vector<std::vector<void*>> recv_mhandles(active_comm_count, std::vector<void*>(NUM_REQUESTS, nullptr));
+		std::vector<std::vector<char*>> send_buffers(active_comm_count, std::vector<char*>(NUM_REQUESTS, nullptr));
+		std::vector<std::vector<char*>> recv_buffers(active_comm_count, std::vector<char*>(NUM_REQUESTS, nullptr));
+
+		// Allocate and register buffers for all communicators
+		for (size_t comm_idx = 0; comm_idx < active_comm_count; comm_idx++) {
+			for (int req_idx = 0; req_idx < NUM_REQUESTS; req_idx++) {
+				if (rank == 0) {
+					if (allocate_buff(reinterpret_cast<void**>(&send_buffers[comm_idx][req_idx]), send_size, buffer_type) != ncclSuccess ||
+					    initialize_buff(send_buffers[comm_idx][req_idx], send_size, buffer_type) != ncclSuccess ||
+					    ext_net->regMr(static_cast<void*>(send_comms[comm_idx]), send_buffers[comm_idx][req_idx],
+					                   send_size, buffer_type, &send_mhandles[comm_idx][req_idx]) != ncclSuccess) {
+						return ncclInternalError;
+					}
+				} else {
+					if (allocate_buff(reinterpret_cast<void**>(&recv_buffers[comm_idx][req_idx]), recv_size, buffer_type) != ncclSuccess ||
+					    ext_net->regMr(static_cast<void*>(recv_comms[comm_idx]), recv_buffers[comm_idx][req_idx],
+					                   recv_size, buffer_type, &recv_mhandles[comm_idx][req_idx]) != ncclSuccess) {
+						return ncclInternalError;
+					}
+				}
+			}
+		}
+
+		// Post operations that will be inflight when we abort
+		for (size_t comm_idx = 0; comm_idx < active_comm_count; comm_idx++) {
+			int tag = static_cast<int>(comm_idx) + 1;
+			
+			if (rank == 0) {
+				// Send operations
+				for (int req_idx = 0; req_idx < NUM_REQUESTS; req_idx++) {
+					while (send_reqs[comm_idx][req_idx] == nullptr) {
+						ext_net->isend(static_cast<void*>(send_comms[comm_idx]), 
+						              send_buffers[comm_idx][req_idx], send_size, tag,
+						              send_mhandles[comm_idx][req_idx],
+						              reinterpret_cast<void**>(&send_reqs[comm_idx][req_idx]));
+					}
+				}
+			} else {
+				// Receive operations
+				for (int req_idx = 0; req_idx < NUM_REQUESTS; req_idx++) {
+					size_t sizes[nrecv];
+					int tags[nrecv];
+					for (int recv_n = 0; recv_n < nrecv; recv_n++) {
+						sizes[recv_n] = recv_size;
+						tags[recv_n] = tag;
+					}
+					
+					while (recv_reqs[comm_idx][req_idx] == nullptr) {
+						ext_net->irecv(static_cast<void*>(recv_comms[comm_idx]), nrecv,
+						              reinterpret_cast<void**>(&recv_buffers[comm_idx][req_idx]), 
+						              sizes, tags, &recv_mhandles[comm_idx][req_idx],
+						              reinterpret_cast<void**>(&recv_reqs[comm_idx][req_idx]));
+					}
+				}
+			}
+		}
+
+		NCCL_OFI_INFO(NCCL_NET, "RANK %d: Posted %d inflight requests across %zu communicators", 
+		              rank, NUM_REQUESTS, active_comm_count);
+
+		// Cleanup with inflight requests (this is the abort scenario test)
+		for (size_t comm_idx = 0; comm_idx < active_comm_count; comm_idx++) {
+			for (int req_idx = 0; req_idx < NUM_REQUESTS; req_idx++) {
+				if (rank == 0 && send_mhandles[comm_idx][req_idx]) {
+					ext_net->deregMr(static_cast<void*>(send_comms[comm_idx]), send_mhandles[comm_idx][req_idx]);
+				}
+				if (rank == 1 && recv_mhandles[comm_idx][req_idx]) {
+					ext_net->deregMr(static_cast<void*>(recv_comms[comm_idx]), recv_mhandles[comm_idx][req_idx]);
+				}
+			}
+		}
+
+		return ncclSuccess;
+	}
+
+	void cleanup(test_nccl_net_t* ext_net) {
+		if (!ext_net) return;
+
+		for (size_t i = 0; i < active_comm_count; i++) {
+			if (send_comms[i]) ext_net->closeSend(static_cast<void*>(send_comms[i]));
+			if (recv_comms[i]) ext_net->closeRecv(static_cast<void*>(recv_comms[i]));
+			if (listen_comms[i]) ext_net->closeListen(static_cast<void*>(listen_comms[i]));
+		}
+		active_comm_count = 0;
+	}
+
+	void set_device_id(int dev_id) { device_id = dev_id; }
+	size_t get_active_comm_count() const { return active_comm_count; }
 };
 
-enum abort_scenario {
-	ABORT_DURING_CONNECT,
-	ABORT_DURING_SEND,
-	ABORT_DURING_RECV,
-	ABORT_DURING_OPERATIONS,
-	ABORT_AFTER_OPERATIONS
+class ThreadAbortContext {
+private:
+	int thread_id{0}, rank{0}, device_id{0}, buffer_type{0};
+	test_nccl_net_t* ext_net{nullptr};
+	MultiCommAbortContext comm_ctx{};
+	std::atomic<bool> ready{false}, start_test{false}, completed{false};
+	pthread_barrier_t* setup_barrier{nullptr}, *test_barrier{nullptr}, *cleanup_barrier{nullptr};
+	ncclResult_t result{ncclSuccess};
+
+public:
+	ThreadAbortContext() = default;
+
+	void initialize(int tid, int r, int dev_id, int buf_type, test_nccl_net_t* net,
+		pthread_barrier_t* setup_bar, pthread_barrier_t* test_bar, pthread_barrier_t* cleanup_bar) {
+		thread_id = tid;
+		rank = r;
+		device_id = dev_id;
+		buffer_type = buf_type;
+		ext_net = net;
+		setup_barrier = setup_bar;
+		test_barrier = test_bar;
+		cleanup_barrier = cleanup_bar;
+		result = ncclSuccess;
+	}
+
+	// Accessors
+	int get_thread_id() const { return thread_id; }
+	int get_rank() const { return rank; }
+	int get_device_id() const { return device_id; }
+	int get_buffer_type() const { return buffer_type; }
+	test_nccl_net_t* get_ext_net() const { return ext_net; }
+	MultiCommAbortContext& get_comm_ctx() { return comm_ctx; }
+	ncclResult_t get_result() const { return result; }
+
+	// State management
+	void set_ready(bool state) { ready.store(state); }
+	bool is_ready() const { return ready.load(); }
+	void set_start_test(bool state) { start_test.store(state); }
+	bool should_start_test() const { return start_test.load(); }
+	void set_completed(bool state) { completed.store(state); }
+	bool is_completed() const { return completed.load(); }
+	void set_result(ncclResult_t res) { result = res; }
+
+	// Barrier operations
+	void wait_setup_barrier() { if (setup_barrier) pthread_barrier_wait(setup_barrier); }
+	void wait_test_barrier() { if (test_barrier) pthread_barrier_wait(test_barrier); }
+	void wait_cleanup_barrier() { if (cleanup_barrier) pthread_barrier_wait(cleanup_barrier); }
 };
 
-static ncclResult_t init_multi_comm_context(multi_comm_context *ctx, int device_id)
+static void* thread_worker(void* arg)
 {
-	if (!ctx) return ncclInvalidArgument;
-	
-	memset(ctx, 0, sizeof(*ctx));
-	ctx->device_id = device_id;
-	ctx->active_comm_count = 0;
-	
-	return ncclSuccess;
-}
+	auto* thread_ctx = static_cast<ThreadAbortContext*>(arg);
+	int rank = thread_ctx->get_rank();
+	int thread_id = thread_ctx->get_thread_id();
 
-static ncclResult_t create_communicator_pair(multi_comm_context *ctx, int comm_idx, 
-					     test_nccl_net_t *extNet, int rank, int size)
-{
-	ncclResult_t res = ncclSuccess;
-	char src_handle[NCCL_NET_HANDLE_MAXSIZE] = {};
-	char handle[NCCL_NET_HANDLE_MAXSIZE] = {};
-	
-	if (!ctx || comm_idx >= MAX_TEST_COMMS || !extNet) {
-		return ncclInvalidArgument;
-	}
+	NCCL_OFI_INFO(NCCL_INIT, "RANK %d THREAD %d: Starting abort scenario thread", rank, thread_id);
 
-	NCCL_OFI_INFO(NCCL_INIT, "Creating communicator pair %d on device %d", 
-		      comm_idx, ctx->device_id);
-
-	/* Listen API */
-	OFINCCLCHECKGOTO(extNet->listen(ctx->device_id, (void *)&handle, 
-					(void **)&ctx->lComms[comm_idx]), res, exit);
-
-	if (rank == 0) {
-		int peer_rank = 1;
-
-		/* MPI send handle */
-		MPI_Send(&handle, NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, peer_rank, 
-			 comm_idx, MPI_COMM_WORLD);
-
-		/* MPI recv handle */
-		MPI_Recv((void *)src_handle, NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, 
-			 peer_rank, comm_idx, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-
-		NCCL_OFI_INFO(NCCL_INIT, "Comm %d: Establishing connections", comm_idx);
-
-		while (ctx->sComms[comm_idx] == NULL || ctx->rComms[comm_idx] == NULL) {
-			/* Connect API */
-			if (ctx->sComms[comm_idx] == NULL) {
-				OFINCCLCHECKGOTO(extNet->connect(ctx->device_id, (void *)src_handle, 
-								(void **)&ctx->sComms[comm_idx], 
-								&ctx->s_handles[comm_idx]), res, exit);
-			}
-
-			/* Accept API */
-			if (ctx->rComms[comm_idx] == NULL) {
-				OFINCCLCHECKGOTO(extNet->accept((void *)ctx->lComms[comm_idx], 
-							       (void **)&ctx->rComms[comm_idx], 
-							       &ctx->r_handles[comm_idx]), res, exit);
-			}
-		}
+#if HAVE_CUDA
+	// Initialize CUDA runtime for this worker thread
+	bool cuda_initialized = initialize_cuda_for_thread();
+	if (cuda_initialized) {
+		NCCL_OFI_INFO(NCCL_INIT, "RANK %d THREAD %d: CUDA runtime initialized successfully", rank, thread_id);
 	} else {
-		int peer_rank = 0;
+		NCCL_OFI_WARN("RANK %d THREAD %d: Failed to initialize CUDA runtime", rank, thread_id);
+	}
+#endif
 
-		/* MPI recv handle */
-		MPI_Recv((void *)src_handle, NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, 
-			 peer_rank, comm_idx, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+	thread_ctx->get_comm_ctx().set_device_id(thread_ctx->get_device_id());
 
-		/* MPI send handle */
-		MPI_Send((void *)handle, NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, 
-			 peer_rank, comm_idx, MPI_COMM_WORLD);
-
-		NCCL_OFI_INFO(NCCL_INIT, "Comm %d: Establishing connections", comm_idx);
-
-		while (ctx->sComms[comm_idx] == NULL || ctx->rComms[comm_idx] == NULL) {
-			/* Connect API */
-			if (ctx->sComms[comm_idx] == NULL) {
-				OFINCCLCHECKGOTO(extNet->connect(ctx->device_id, (void *)src_handle, 
-								(void **)&ctx->sComms[comm_idx], 
-								&ctx->s_handles[comm_idx]), res, exit);
-			}
-
-			/* Accept API */
-			if (ctx->rComms[comm_idx] == NULL) {
-				OFINCCLCHECKGOTO(extNet->accept((void *)ctx->lComms[comm_idx], 
-							       (void **)&ctx->rComms[comm_idx], 
-							       &ctx->r_handles[comm_idx]), res, exit);
-			}
+	// Create communicators
+	for (size_t comm_idx = 0; comm_idx < MAX_TEST_COMMS; comm_idx++) {
+		if (thread_ctx->get_comm_ctx().create_communicator_pair(thread_ctx->get_ext_net(), comm_idx,
+			thread_ctx->get_rank(), thread_ctx->get_device_id(), thread_ctx->get_thread_id()) != ncclSuccess) {
+			NCCL_OFI_WARN("RANK %d THREAD %d: Failed to create communicator %zu", rank, thread_id, comm_idx);
+			thread_ctx->set_result(ncclInternalError);
+			thread_ctx->get_comm_ctx().cleanup(thread_ctx->get_ext_net());
+			thread_ctx->set_completed(true);
+			return nullptr;
 		}
+		thread_ctx->wait_setup_barrier();
 	}
 
-	ctx->active_comm_count++;
-	NCCL_OFI_INFO(NCCL_INIT, "Successfully created communicator pair %d", comm_idx);
+	// Signal ready and wait for start
+	thread_ctx->set_ready(true);
+	while (!thread_ctx->should_start_test()) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
 
-exit:
-	return res;
-}
-
-static ncclResult_t test_abort_during_connect(multi_comm_context *ctx, int comm_idx, 
-					     test_nccl_net_t *extNet, int rank, int size)
-{
-	ncclResult_t res = ncclSuccess;
-	char src_handle[NCCL_NET_HANDLE_MAXSIZE] = {};
-	char handle[NCCL_NET_HANDLE_MAXSIZE] = {};
+	// Run abort scenario test
+	ncclResult_t result = thread_ctx->get_comm_ctx().test_inflight_abort(thread_ctx->get_ext_net(),
+		thread_ctx->get_buffer_type(), thread_ctx->get_rank());
 	
-	if (!ctx || comm_idx >= MAX_TEST_COMMS || !extNet) {
-		return ncclInvalidArgument;
-	}
-
-	NCCL_OFI_INFO(NCCL_INIT, "Testing abort during connection establishment for communicator %d", comm_idx);
-
-	/* Listen API */
-	OFINCCLCHECKGOTO(extNet->listen(ctx->device_id, (void *)&handle, 
-					(void **)&ctx->lComms[comm_idx]), res, exit);
-
-	if (rank == 0) {
-		int peer_rank = 1;
-
-		/* MPI send handle */
-		MPI_Send(&handle, NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, peer_rank, 
-			 comm_idx, MPI_COMM_WORLD);
-
-		/* MPI recv handle */
-		MPI_Recv((void *)src_handle, NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, 
-			 peer_rank, comm_idx, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-
-		NCCL_OFI_INFO(NCCL_INIT, "Comm %d: Starting connection, will abort during process", comm_idx);
-
-		/* Start connection but abort before completion */
-		OFINCCLCHECKGOTO(extNet->connect(ctx->device_id, (void *)src_handle, 
-						(void **)&ctx->sComms[comm_idx], 
-						&ctx->s_handles[comm_idx]), res, exit);
-
-		/* Simulate abort during connection establishment */
-		NCCL_OFI_INFO(NCCL_INIT, "Simulating abort during connection establishment");
-		goto exit; /* Simulate abrupt termination */
+	if (result != ncclSuccess) {
+		NCCL_OFI_WARN("RANK %d THREAD %d: Inflight abort test failed: %d", rank, thread_id, result);
+		thread_ctx->set_result(result);
 	} else {
-		int peer_rank = 0;
-
-		/* MPI recv handle */
-		MPI_Recv((void *)src_handle, NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, 
-			 peer_rank, comm_idx, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-
-		/* MPI send handle */
-		MPI_Send((void *)handle, NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, 
-			 peer_rank, comm_idx, MPI_COMM_WORLD);
-
-		NCCL_OFI_INFO(NCCL_INIT, "Comm %d: Starting connection, will abort during process", comm_idx);
-
-		/* Start connection but abort before completion */
-		OFINCCLCHECKGOTO(extNet->connect(ctx->device_id, (void *)src_handle, 
-						(void **)&ctx->sComms[comm_idx], 
-						&ctx->s_handles[comm_idx]), res, exit);
-
-		/* Simulate abort during connection establishment */
-		NCCL_OFI_INFO(NCCL_INIT, "Simulating abort during connection establishment");
-		goto exit; /* Simulate abrupt termination */
+		NCCL_OFI_INFO(NCCL_INIT, "RANK %d THREAD %d: Inflight abort test passed", rank, thread_id);
 	}
 
-exit:
-	return res;
+	thread_ctx->wait_test_barrier();
+
+	// Cleanup
+	thread_ctx->get_comm_ctx().cleanup(thread_ctx->get_ext_net());
+	thread_ctx->wait_cleanup_barrier();
+
+#if HAVE_CUDA
+	// CUDA runtime cleanup is automatic when thread exits
+	if (cuda_initialized) {
+		NCCL_OFI_INFO(NCCL_INIT, "RANK %d THREAD %d: CUDA runtime cleanup handled automatically", rank, thread_id);
+	}
+#endif
+
+	thread_ctx->set_completed(true);
+	return nullptr;
 }
 
-static ncclResult_t test_send_recv_operations(multi_comm_context *ctx, int comm_idx, 
-					      test_nccl_net_t *extNet, int rank, 
-					      abort_scenario abort_timing)
+static ncclResult_t test_multithreaded_abort_scenarios(test_nccl_net_t* ext_net, int device_id,
+	int buffer_type, int rank)
 {
-	ncclResult_t res = ncclSuccess;
-	void *send_buf = NULL, *recv_buf = NULL;
-	void *send_mhandle = NULL, *recv_mhandle = NULL;
-	void *send_req = NULL, *recv_req = NULL;
-	int done = 0;
-	size_t buffer_size = SEND_SIZE;
-	int buffer_type = NCCL_PTR_HOST;
-	
-	if (!ctx || comm_idx >= MAX_TEST_COMMS || !extNet) {
-		return ncclInvalidArgument;
-	}
+	NCCL_OFI_INFO(NCCL_INIT, "RANK %d: Starting multithreaded abort scenarios with device %d, threads %zu, comms %zu",
+		rank, device_id, MAX_TEST_THREADS, MAX_TEST_COMMS);
 
-	NCCL_OFI_INFO(NCCL_INIT, "Testing send/recv operations on communicator %d", comm_idx);
+	std::vector<pthread_t> threads(MAX_TEST_THREADS);
+	std::vector<ThreadAbortContext> thread_contexts(MAX_TEST_THREADS);
+	pthread_barrier_t setup_barrier, test_barrier, cleanup_barrier;
 
-	/* Allocate buffers */
-	OFINCCLCHECKGOTO(allocate_buff(&send_buf, buffer_size, buffer_type), res, exit);
-	OFINCCLCHECKGOTO(allocate_buff(&recv_buf, buffer_size, buffer_type), res, exit);
-	
-	/* Initialize send buffer */
-	OFINCCLCHECKGOTO(initialize_buff(send_buf, buffer_size, buffer_type), res, exit);
-
-	/* Register memory */
-	OFINCCLCHECKGOTO(extNet->regMr((void *)ctx->sComms[comm_idx], send_buf, buffer_size, 
-				       buffer_type, &send_mhandle), res, exit);
-	OFINCCLCHECKGOTO(extNet->regMr((void *)ctx->rComms[comm_idx], recv_buf, buffer_size, 
-				       buffer_type, &recv_mhandle), res, exit);
-
-	if (rank == 0) {
-		/* Post receive first */
-		OFINCCLCHECKGOTO(extNet->irecv((void *)ctx->rComms[comm_idx], 1, &recv_buf, 
-					       &buffer_size, &buffer_type, &recv_mhandle, &recv_req), res, exit);
-
-		/* Test abort during recv if specified */
-		if (abort_timing == ABORT_DURING_RECV) {
-			NCCL_OFI_INFO(NCCL_INIT, "Simulating abort during recv operation");
-			goto exit; /* Simulate abrupt termination */
-		}
-
-		/* Send data */
-		OFINCCLCHECKGOTO(extNet->isend((void *)ctx->sComms[comm_idx], send_buf, buffer_size, 
-					       buffer_type, send_mhandle, &send_req), res, exit);
-
-		/* Test abort during send if specified */
-		if (abort_timing == ABORT_DURING_SEND) {
-			NCCL_OFI_INFO(NCCL_INIT, "Simulating abort during send operation");
-			goto exit; /* Simulate abrupt termination */
-		}
-
-		/* Wait for operations to complete */
-		while (!done) {
-			OFINCCLCHECKGOTO(extNet->test(send_req, &done, NULL), res, exit);
-		}
-		done = 0;
-		while (!done) {
-			OFINCCLCHECKGOTO(extNet->test(recv_req, &done, NULL), res, exit);
-		}
-	} else {
-		/* Post send first */
-		OFINCCLCHECKGOTO(extNet->isend((void *)ctx->sComms[comm_idx], send_buf, buffer_size, 
-					       buffer_type, send_mhandle, &send_req), res, exit);
-
-		/* Test abort during send if specified */
-		if (abort_timing == ABORT_DURING_SEND) {
-			NCCL_OFI_INFO(NCCL_INIT, "Simulating abort during send operation");
-			goto exit; /* Simulate abrupt termination */
-		}
-
-		/* Receive data */
-		OFINCCLCHECKGOTO(extNet->irecv((void *)ctx->rComms[comm_idx], 1, &recv_buf, 
-					       &buffer_size, &buffer_type, &recv_mhandle, &recv_req), res, exit);
-
-		/* Test abort during recv if specified */
-		if (abort_timing == ABORT_DURING_RECV) {
-			NCCL_OFI_INFO(NCCL_INIT, "Simulating abort during recv operation");
-			goto exit; /* Simulate abrupt termination */
-		}
-
-		/* Wait for operations to complete */
-		while (!done) {
-			OFINCCLCHECKGOTO(extNet->test(send_req, &done, NULL), res, exit);
-		}
-		done = 0;
-		while (!done) {
-			OFINCCLCHECKGOTO(extNet->test(recv_req, &done, NULL), res, exit);
+	bool use_barriers = (MAX_TEST_THREADS > 1);
+	if (use_barriers) {
+		int total_threads = MAX_TEST_THREADS;
+		if (pthread_barrier_init(&setup_barrier, nullptr, total_threads) != 0 ||
+		    pthread_barrier_init(&test_barrier, nullptr, total_threads) != 0 ||
+		    pthread_barrier_init(&cleanup_barrier, nullptr, total_threads) != 0) {
+			NCCL_OFI_WARN("RANK %d: Failed to initialize barriers", rank);
+			return ncclInternalError;
 		}
 	}
 
-	NCCL_OFI_INFO(NCCL_INIT, "Send/recv operations completed successfully on communicator %d", comm_idx);
+	// Create threads
+	for (size_t i = 0; i < MAX_TEST_THREADS; i++) {
+		auto& ctx = thread_contexts[i];
+		ctx.initialize(static_cast<int>(i), rank, device_id, buffer_type, ext_net,
+			use_barriers ? &setup_barrier : nullptr,
+			use_barriers ? &test_barrier : nullptr,
+			use_barriers ? &cleanup_barrier : nullptr);
 
-exit:
-	/* Cleanup memory registrations */
-	if (send_mhandle) {
-		extNet->deregMr((void *)ctx->sComms[comm_idx], send_mhandle);
-	}
-	if (recv_mhandle) {
-		extNet->deregMr((void *)ctx->rComms[comm_idx], recv_mhandle);
-	}
-
-	/* Cleanup buffers */
-	if (send_buf) {
-		deallocate_buffer(send_buf, buffer_type);
-	}
-	if (recv_buf) {
-		deallocate_buffer(recv_buf, buffer_type);
+		if (pthread_create(&threads[i], nullptr, thread_worker, &ctx) != 0) {
+			NCCL_OFI_WARN("RANK %d: Failed to create thread %zu", rank, i);
+			return ncclInternalError;
+		}
 	}
 
-	return res;
+	// Wait for threads to be ready
+	for (int wait_ms = 0; wait_ms < 30000; wait_ms += 10) {
+		bool all_ready = true;
+		for (size_t i = 0; i < MAX_TEST_THREADS && all_ready; i++) {
+			all_ready = thread_contexts[i].is_ready();
+		}
+		if (all_ready) break;
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+
+	// Start testing
+	for (size_t i = 0; i < MAX_TEST_THREADS; i++) {
+		thread_contexts[i].set_start_test(true);
+	}
+
+	// Wait for completion
+	for (int wait_ms = 0; wait_ms < 30000; wait_ms += 10) {
+		bool all_completed = true;
+		for (size_t i = 0; i < MAX_TEST_THREADS && all_completed; i++) {
+			all_completed = thread_contexts[i].is_completed();
+		}
+		if (all_completed) break;
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+
+	// Join threads and check results
+	ncclResult_t final_result = ncclSuccess;
+	for (size_t i = 0; i < MAX_TEST_THREADS; i++) {
+		pthread_join(threads[i], nullptr);
+		if (thread_contexts[i].get_result() != ncclSuccess) final_result = thread_contexts[i].get_result();
+	}
+
+	// Cleanup barriers
+	if (use_barriers) {
+		pthread_barrier_destroy(&cleanup_barrier);
+		pthread_barrier_destroy(&test_barrier);
+		pthread_barrier_destroy(&setup_barrier);
+	}
+
+	return final_result;
 }
 
-static ncclResult_t abort_communicator(multi_comm_context *ctx, int comm_idx, 
-				       test_nccl_net_t *extNet, abort_scenario scenario)
+static void parse_arguments(int argc, char* argv[])
 {
-	ncclResult_t res = ncclSuccess;
-	
-	if (!ctx || comm_idx >= MAX_TEST_COMMS || !extNet) {
-		return ncclInvalidArgument;
-	}
-
-	NCCL_OFI_INFO(NCCL_INIT, "Aborting communicator %d with scenario %d", 
-		      comm_idx, scenario);
-
-	/* Force close communicator components abruptly */
-	if (ctx->lComms[comm_idx]) {
-		OFINCCLCHECK(extNet->closeListen((void *)ctx->lComms[comm_idx]));
-		ctx->lComms[comm_idx] = NULL;
-	}
-	
-	if (ctx->sComms[comm_idx]) {
-		OFINCCLCHECK(extNet->closeSend((void *)ctx->sComms[comm_idx]));
-		ctx->sComms[comm_idx] = NULL;
-	}
-	
-	if (ctx->rComms[comm_idx]) {
-		OFINCCLCHECK(extNet->closeRecv((void *)ctx->rComms[comm_idx]));
-		ctx->rComms[comm_idx] = NULL;
-	}
-
-	ctx->active_comm_count--;
-	NCCL_OFI_INFO(NCCL_INIT, "Successfully aborted communicator %d", comm_idx);
-
-	return res;
-}
-
-static ncclResult_t validate_surviving_communicators(multi_comm_context *ctx, 
-						    int aborted_comm_idx, 
-						    test_nccl_net_t *extNet, int rank)
-{
-	ncclResult_t res = ncclSuccess;
-	
-	NCCL_OFI_INFO(NCCL_INIT, "Validating surviving communicators after abort of comm %d", 
-		      aborted_comm_idx);
-
-	/* Check that other communicators are still functional by performing operations */
-	for (int i = 0; i < MAX_TEST_COMMS; i++) {
-		if (i == aborted_comm_idx) continue;
-		
-		if (ctx->sComms[i] && ctx->rComms[i]) {
-			NCCL_OFI_INFO(NCCL_INIT, "Testing functionality of surviving communicator %d", i);
-			
-			/* Perform a simple send/recv operation to validate functionality */
-			OFINCCLCHECKGOTO(test_send_recv_operations(ctx, i, extNet, rank, ABORT_AFTER_OPERATIONS), res, exit);
-			
-			NCCL_OFI_INFO(NCCL_INIT, "Communicator %d is still active and functional", i);
+	for (int i = 1; i < argc; i++) {
+		std::string arg = argv[i];
+		if (arg == "--comms" && i + 1 < argc) {
+			MAX_TEST_COMMS = std::max(1, std::stoi(argv[++i]));
+		} else if (arg == "--threads" && i + 1 < argc) {
+			MAX_TEST_THREADS = std::max(1, std::stoi(argv[++i]));
+		} else if (arg == "--help" || arg == "-h") {
+			std::cout << "Usage: " << argv[0] << " [--comms N] [--threads N]\n"
+			          << "  --comms N    Number of communicators per thread (default: 2)\n"
+			          << "  --threads N  Number of threads per rank (default: 2)\n"
+			          << "  --help       Show this help message\n"
+			          << "\nTests closing communicators with inflight requests across multiple threads and communicators\n";
+			std::exit(0);
 		}
 	}
 
-exit:
-	return res;
-}
-
-static ncclResult_t test_system_recovery_after_abort(multi_comm_context *ctx, 
-						     test_nccl_net_t *extNet, 
-						     int rank, int size, int dev)
-{
-	ncclResult_t res = ncclSuccess;
-	
-	NCCL_OFI_INFO(NCCL_INIT, "Testing system recovery: creating new communicators after abort");
-
-	/* Test that new communicators can be created after abort scenarios */
-	int recovery_comm_idx = 2; /* Use a different index for recovery test */
-	
-	OFINCCLCHECKGOTO(create_communicator_pair(ctx, recovery_comm_idx, extNet, rank, size), res, exit);
-	
-	NCCL_OFI_INFO(NCCL_INIT, "Successfully created new communicator %d after abort scenario", recovery_comm_idx);
-
-	/* Test that the new communicator is functional */
-	OFINCCLCHECKGOTO(test_send_recv_operations(ctx, recovery_comm_idx, extNet, rank, ABORT_AFTER_OPERATIONS), res, exit);
-	
-	NCCL_OFI_INFO(NCCL_INIT, "New communicator %d is fully functional after system recovery", recovery_comm_idx);
-
-exit:
-	return res;
-}
-
-static ncclResult_t validate_error_handling(multi_comm_context *ctx, int aborted_comm_idx, 
-					    test_nccl_net_t *extNet)
-{
-	ncclResult_t res = ncclSuccess;
-	
-	NCCL_OFI_INFO(NCCL_INIT, "Validating proper error handling for aborted communicator %d", aborted_comm_idx);
-
-	/* Verify that the aborted communicator is properly marked as inactive */
-	if (ctx->sComms[aborted_comm_idx] == NULL && 
-	    ctx->rComms[aborted_comm_idx] == NULL && 
-	    ctx->lComms[aborted_comm_idx] == NULL) {
-		NCCL_OFI_INFO(NCCL_INIT, "Aborted communicator %d properly cleaned up", aborted_comm_idx);
-	} else {
-		NCCL_OFI_WARN("Aborted communicator %d not properly cleaned up", aborted_comm_idx);
-		res = ncclSystemError;
+	if (const char* env = std::getenv("MAX_TEST_COMMS")) {
+		MAX_TEST_COMMS = std::max(1, std::stoi(env));
 	}
-
-	/* Verify active communicator count is correct */
-	int expected_active = 0;
-	for (int i = 0; i < MAX_TEST_COMMS; i++) {
-		if (ctx->sComms[i] && ctx->rComms[i]) {
-			expected_active++;
-		}
+	if (const char* env = std::getenv("MAX_TEST_THREADS")) {
+		MAX_TEST_THREADS = std::max(1, std::stoi(env));
 	}
-
-	if (ctx->active_comm_count == expected_active) {
-		NCCL_OFI_INFO(NCCL_INIT, "Active communicator count is correct: %d", ctx->active_comm_count);
-	} else {
-		NCCL_OFI_WARN("Active communicator count mismatch: expected %d, got %d", 
-			      expected_active, ctx->active_comm_count);
-		res = ncclSystemError;
-	}
-
-	return res;
-}
-
-static ncclResult_t cleanup_multi_comm_context(multi_comm_context *ctx, test_nccl_net_t *extNet)
-{
-	ncclResult_t res = ncclSuccess;
-	
-	if (!ctx || !extNet) return ncclInvalidArgument;
-
-	NCCL_OFI_INFO(NCCL_INIT, "Cleaning up remaining communicators");
-
-	for (int i = 0; i < MAX_TEST_COMMS; i++) {
-		if (ctx->lComms[i]) {
-			OFINCCLCHECK(extNet->closeListen((void *)ctx->lComms[i]));
-			ctx->lComms[i] = NULL;
-		}
-		
-		if (ctx->sComms[i]) {
-			OFINCCLCHECK(extNet->closeSend((void *)ctx->sComms[i]));
-			ctx->sComms[i] = NULL;
-		}
-		
-		if (ctx->rComms[i]) {
-			OFINCCLCHECK(extNet->closeRecv((void *)ctx->rComms[i]));
-			ctx->rComms[i] = NULL;
-		}
-	}
-
-	ctx->active_comm_count = 0;
-	return res;
 }
 
 int main(int argc, char* argv[])
 {
-	ncclResult_t res = ncclSuccess;
-	int rank, size, proc_name;
-	char name[MPI_MAX_PROCESSOR_NAME];
+	int rank = -1, proc_name_len = -1, num_ranks = 0, local_rank = 0;
+	
+	test_nccl_properties_t props = {};
 
 	/* Plugin defines */
-	int ndev;
+	int ndev = -1;
 	test_nccl_net_t *extNet = NULL;
-	multi_comm_context comm_ctx = {};
 
-	/* Declare variables to avoid goto crossing initialization */
-	int dev = 0;
-	abort_scenario scenarios[] = {ABORT_DURING_CONNECT, ABORT_DURING_SEND, ABORT_DURING_RECV, ABORT_DURING_OPERATIONS};
-	int num_scenarios = sizeof(scenarios) / sizeof(scenarios[0]);
-
+	parse_arguments(argc, argv);
 	ofi_log_function = logger;
 
 	/* Indicates if NICs support GPUDirect */
-	int *test_support_gdr = NULL;
+	std::vector<int> test_support_gdr;
+
+	/* All processors IDs, used to find out the local rank */
+	std::vector<char> all_proc_name;
 
 	MPI_Init(&argc, &argv);
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-	MPI_Comm_size(MPI_COMM_WORLD, &size);
-	if (size != 2) {
+	MPI_Comm_size(MPI_COMM_WORLD, &num_ranks);
+	if (num_ranks != 2) {
 		NCCL_OFI_WARN("Expected two ranks but got %d. "
-			"The comm_abort_scenarios functional test should be run with exactly two ranks.",
-			size);
-		res = ncclInvalidArgument;
-		goto exit;
-	}
-	if (!(0 <= rank && rank <= 1)) {
-		NCCL_OFI_WARN("World size was %d, but was local rank is %d. "
-			      "MPI is behaving strangely, cannot continue.",
-			      size, rank);
-		res = ncclInvalidArgument;
-		goto exit;
+			"The inflight_close functional test should be run with exactly two ranks.",
+			num_ranks);
+		return ncclInvalidArgument;
 	}
 
-	MPI_Get_processor_name(name, &proc_name);
+	all_proc_name.resize(num_ranks * MPI_MAX_PROCESSOR_NAME);
+
+	MPI_Get_processor_name(&all_proc_name[PROC_NAME_IDX(rank)], &proc_name_len);
+	MPI_Allgather(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, all_proc_name.data(),
+			MPI_MAX_PROCESSOR_NAME, MPI_BYTE, MPI_COMM_WORLD);
+
+	/* Determine local rank */
+	for (int i = 0; i < num_ranks; i++) {
+		if (!strcmp(&all_proc_name[PROC_NAME_IDX(rank)],
+				&all_proc_name[PROC_NAME_IDX(i)])) {
+			if (i < rank) {
+				++local_rank;
+			}
+		}
+	}
+
+	/* Set CUDA device for subsequent device memory allocation, in case GDR is used */
+	NCCL_OFI_TRACE(NCCL_NET, "Using CUDA device %d for memory allocation", local_rank);
 
 	/* Get external Network from NCCL-OFI library */
 	extNet = get_extNet();
 	if (extNet == NULL) {
-		res = ncclInternalError;
-		goto exit;
+		return ncclInternalError;
 	}
 
 	/* Init API */
-	OFINCCLCHECKGOTO(extNet->init(logger), res, exit);
-	NCCL_OFI_INFO(NCCL_INIT, "Process rank %d started. NCCLNet device used on %s is %s.",
-		      rank, name, extNet->name);
+	OFINCCLCHECK(extNet->init(&logger));
+	NCCL_OFI_INFO(NCCL_NET, "Process rank %d started. NCCLNet device used on %s is %s.", rank,
+			&all_proc_name[PROC_NAME_IDX(rank)], extNet->name);
+	NCCL_OFI_INFO(NCCL_INIT, "Test configuration: %zu communicators per thread, %zu threads per rank",
+		MAX_TEST_COMMS, MAX_TEST_THREADS);
+
+#if HAVE_CUDA
+	// Calculate CUDA device mapping before creating threads (avoids MPI thread safety issues)
+	if (!calculate_local_rank_and_cuda_device()) {
+		NCCL_OFI_WARN("Failed to calculate CUDA device mapping");
+		MPI_Finalize();
+		return ncclInternalError;
+	}
+#endif
 
 	/* Devices API */
-	OFINCCLCHECKGOTO(extNet->devices(&ndev), res, exit);
-	NCCL_OFI_INFO(NCCL_INIT, "Received %d network devices", ndev);
+	OFINCCLCHECK(extNet->devices(&ndev));
+	NCCL_OFI_INFO(NCCL_NET, "Received %d network devices", ndev);
 
-	test_support_gdr = (int *)malloc(sizeof(int) * ndev);
-	if (test_support_gdr == NULL) {
-		NCCL_OFI_WARN("Failed to allocate memory");
-		res = ncclInternalError;
-		goto exit;
-	}
+	test_support_gdr.resize(ndev);
 
 	/* Get Properties for the device */
-	for (int dev_idx = 0; dev_idx < ndev; dev_idx++) {
-		test_nccl_properties_t props = {};
-		OFINCCLCHECKGOTO(extNet->getProperties(dev_idx, &props), res, exit);
-		print_dev_props(dev_idx, &props);
+	for (int dev = 0; dev < ndev; dev++) {
+		OFINCCLCHECK(extNet->getProperties(dev, &props));
+		print_dev_props(dev, &props);
 
 		/* Set CUDA support */
-		test_support_gdr[dev_idx] = is_gdr_supported_nic(props.ptrSupport);
+		test_support_gdr[dev] = is_gdr_supported_nic(props.ptrSupport);
 	}
 
-	NCCL_OFI_TRACE(NCCL_INIT, "Rank %d testing abort scenarios on device %d", rank, dev);
+	/* Test all devices */
+	for (int dev_idx = 0; dev_idx < ndev; dev_idx++) {
 
-	if (test_support_gdr[dev] == 1) {
-		NCCL_OFI_INFO(NCCL_INIT | NCCL_NET,
-				"Network supports communication using CUDA buffers. Dev: %d", dev);
-	}
+		for (int i = 0; i < RESTART_ITERS; ++i) {
 
-	/* Initialize multi-communicator context */
-	res = init_multi_comm_context(&comm_ctx, dev);
-	if (res != ncclSuccess) goto exit;
-
-	for (int scenario_idx = 0; scenario_idx < num_scenarios; scenario_idx++) {
-		abort_scenario current_scenario = scenarios[scenario_idx];
-		
-		NCCL_OFI_INFO(NCCL_INIT, "Testing abort scenario %d: %s", scenario_idx,
-			      (current_scenario == ABORT_DURING_CONNECT) ? "ABORT_DURING_CONNECT" :
-			      (current_scenario == ABORT_DURING_SEND) ? "ABORT_DURING_SEND" :
-			      (current_scenario == ABORT_DURING_RECV) ? "ABORT_DURING_RECV" :
-			      "ABORT_DURING_OPERATIONS");
-
-		/* Create multiple communicator pairs for this scenario */
-		NCCL_OFI_INFO(NCCL_INIT, "Creating %d communicator pairs for scenario %d", MAX_TEST_COMMS, scenario_idx);
-		
-		for (int i = 0; i < MAX_TEST_COMMS; i++) {
-			if (current_scenario == ABORT_DURING_CONNECT && i == 1) {
-				/* Test abort during connection establishment for communicator 1 */
-				OFINCCLCHECKGOTO(test_abort_during_connect(&comm_ctx, i, extNet, rank, size), res, exit);
-				/* Force cleanup of partially created communicator */
-				abort_communicator(&comm_ctx, i, extNet, current_scenario);
-			} else {
-				OFINCCLCHECKGOTO(create_communicator_pair(&comm_ctx, i, extNet, rank, size), res, exit);
+			int dev = dev_idx;
+			if (rank == 1) {
+				/* In rank 1 scan devices in the opposite direction */
+				dev = ndev - dev_idx - 1;
 			}
+
+			int buffer_type = NCCL_PTR_HOST;
+			if (test_support_gdr[dev] == 1) {
+				NCCL_OFI_INFO(NCCL_INIT | NCCL_NET,
+					"Network supports communication using CUDA buffers. Dev: %d", dev);
+				buffer_type = NCCL_PTR_CUDA;
+			}
+
+			OFINCCLCHECK(test_multithreaded_abort_scenarios(extNet, dev, buffer_type, rank));
+
 			MPI_Barrier(MPI_COMM_WORLD);
+
 		}
-
-		NCCL_OFI_INFO(NCCL_INIT, "Created communicator pairs for scenario %d", scenario_idx);
-
-		/* Test operations and abort scenarios */
-		if (current_scenario == ABORT_DURING_SEND || current_scenario == ABORT_DURING_RECV) {
-			/* Test send/recv operations with abort timing */
-			for (int i = 0; i < MAX_TEST_COMMS; i++) {
-				if (comm_ctx.sComms[i] && comm_ctx.rComms[i]) {
-					if (i == 1) {
-						/* This will simulate abort during send/recv */
-						test_send_recv_operations(&comm_ctx, i, extNet, rank, current_scenario);
-						/* Force cleanup after simulated abort */
-						abort_communicator(&comm_ctx, i, extNet, current_scenario);
-					} else {
-						/* Normal operations for other communicators */
-						test_send_recv_operations(&comm_ctx, i, extNet, rank, ABORT_AFTER_OPERATIONS);
-					}
-				}
-			}
-		} else if (current_scenario == ABORT_DURING_OPERATIONS) {
-			/* Test abort during normal operations */
-			int abort_comm_idx = 1;
-			NCCL_OFI_INFO(NCCL_INIT, "Testing abort during operations: aborting communicator %d", abort_comm_idx);
-			
-			OFINCCLCHECKGOTO(abort_communicator(&comm_ctx, abort_comm_idx, extNet, current_scenario), res, exit);
-		}
-		
-		/* Validate that other communicators remain functional */
-		OFINCCLCHECKGOTO(validate_surviving_communicators(&comm_ctx, 1, extNet, rank), res, exit);
-		
-		/* Validate proper error handling and system state */
-		OFINCCLCHECKGOTO(validate_error_handling(&comm_ctx, 1, extNet), res, exit);
-		
-		/* Test system recovery by creating new communicators */
-		OFINCCLCHECKGOTO(test_system_recovery_after_abort(&comm_ctx, extNet, rank, size, dev), res, exit);
-
-		/* Cleanup for next scenario */
-		OFINCCLCHECKGOTO(cleanup_multi_comm_context(&comm_ctx, extNet), res, exit);
-		OFINCCLCHECKGOTO(init_multi_comm_context(&comm_ctx, dev), res, exit);
-
-		MPI_Barrier(MPI_COMM_WORLD);
-		NCCL_OFI_INFO(NCCL_INIT, "Completed abort scenario %d", scenario_idx);
 	}
 
-	MPI_Barrier(MPI_COMM_WORLD);
-
-	/* Cleanup remaining communicators */
-	OFINCCLCHECKGOTO(cleanup_multi_comm_context(&comm_ctx, extNet), res, exit);
-
-	MPI_Barrier(MPI_COMM_WORLD);
 	MPI_Finalize();
-	NCCL_OFI_INFO(NCCL_NET, "Abort scenarios test completed successfully for rank %d", rank);
+	NCCL_OFI_INFO(NCCL_NET, "Multi-threaded communicator abort scenarios test completed successfully for rank %d", rank);
 
-exit:
-	if (test_support_gdr) {
-		free(test_support_gdr);
-		test_support_gdr = NULL;
-	}
-
-	/* Emergency cleanup if needed */
-	cleanup_multi_comm_context(&comm_ctx, extNet);
-
-	return res;
+	return 0;
 }
