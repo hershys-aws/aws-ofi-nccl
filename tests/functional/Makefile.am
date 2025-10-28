@@ -7,6 +7,7 @@
 # Please remember to update .gitignore in this directory.
 
 AM_CPPFLAGS = -I$(top_srcdir)/include
+AM_CPPFLAGS += -I$(top_srcdir)/tests
 AM_CPPFLAGS += -isystem $(abs_top_srcdir)/3rd-party
 AM_CPPFLAGS += -isystem $(abs_top_srcdir)/3rd-party/nccl/$(DEVICE_INTERFACE)/include
 AM_CPPFLAGS += $(MPI_CPPFLAGS) $(CUDA_CPPFLAGS)
@@ -33,18 +34,44 @@ CXXLINK = OMPI_CXX="$(CXX)" MPICH_CXX="$(CXX)" \
 if ENABLE_FUNC_TESTS
 noinst_HEADERS = test-common.h
 
+# Common test framework library
+noinst_LTLIBRARIES = libtest_common.la
+libtest_common_la_SOURCES = test-common.cpp
+libtest_common_la_CPPFLAGS = $(AM_CPPFLAGS)
+libtest_common_la_CXXFLAGS = $(AM_CXXFLAGS)
+
 bin_PROGRAMS = nccl_connection nccl_message_transfer ring inflight_close reuse_listen_comm \
-	multi_comm_domain comm_abort_scenarios resource_cleanup stress_scale
+	multi_comm_domain comm_abort_scenarios resource_cleanup stress_scale simple_framework_test
 
 nccl_connection_SOURCES = nccl_connection.cpp
+nccl_connection_LDADD = libtest_common.la $(LDADD)
+
+simple_framework_test_SOURCES = simple_framework_test.cpp
+simple_framework_test_LDADD = libtest_common.la $(LDADD)
+
 nccl_message_transfer_SOURCES = nccl_message_transfer.cpp
+nccl_message_transfer_LDADD = libtest_common.la $(LDADD)
+
 ring_SOURCES = ring.cpp
+ring_LDADD = libtest_common.la $(LDADD)
+
 inflight_close_SOURCES = inflight_close.cpp
+inflight_close_LDADD = libtest_common.la $(LDADD)
+
 reuse_listen_comm_SOURCES = reuse_listen_comm.cpp
+reuse_listen_comm_LDADD = libtest_common.la $(LDADD)
+
 multi_comm_domain_SOURCES = multi_comm_domain.cpp
+multi_comm_domain_LDADD = libtest_common.la $(LDADD)
+
 comm_abort_scenarios_SOURCES = comm_abort_scenarios.cpp
+comm_abort_scenarios_LDADD = libtest_common.la $(LDADD)
+
 resource_cleanup_SOURCES = resource_cleanup.cpp
+resource_cleanup_LDADD = libtest_common.la $(LDADD)
+
 stress_scale_SOURCES = stress_scale.cpp
+stress_scale_LDADD = libtest_common.la $(LDADD)
 
 # SLURM functional test targets
 check-functional: $(bin_PROGRAMS)

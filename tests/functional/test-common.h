@@ -14,6 +14,11 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <atomic>
+#include <mutex>
+#include <set>
+#include <vector>
+
 #include <cuda_runtime.h>
 #include <nccl/net.h>
 #include <mpi.h>
@@ -63,6 +68,18 @@ typedef ncclNet_v9_t test_nccl_net_t;
 typedef ncclNetProperties_v9_t test_nccl_properties_t;
 typedef ncclNetDeviceHandle_v9_t test_nccl_net_device_handle_t;
 
+// Include utility classes from tests/utils
+#include "utils/thread_context.h"
+#include "utils/thread_utils.h"
+#include "utils/resource_tracker.h"
+#include "utils/test_fixture.h"
+#include "utils/env_parser.h"
+#include "utils/buffer_utils.h"
+#include "utils/data_transfer.h"
+#include "utils/device_utils.h"
+#include "utils/test_params.h"
+
+
 static void logger(ncclDebugLogLevel level, unsigned long flags, const char *filefunc,
 		   int line, const char *fmt, ...)
 {
@@ -96,133 +113,6 @@ static void logger(ncclDebugLogLevel level, unsigned long flags, const char *fil
 	printf("\n");
 	va_end(vargs);
 #pragma GCC diagnostic pop
-}
-
-static inline void print_dev_props(int dev, test_nccl_properties_t *props)
-{
-        NCCL_OFI_TRACE(NCCL_NET, "****************** Device %d Properties ******************", dev);
-        NCCL_OFI_TRACE(NCCL_NET, "%s: PCIe Path: %s", props->name, props->pciPath);
-        NCCL_OFI_TRACE(NCCL_NET, "%s: Plugin Support: %d", props->name, props->ptrSupport);
-        NCCL_OFI_TRACE(NCCL_NET, "%s: Device GUID: %zu", props->name, props->guid);
-        NCCL_OFI_TRACE(NCCL_NET, "%s: Device Speed: %d", props->name, props->speed);
-        NCCL_OFI_TRACE(NCCL_NET, "%s: Device Port: %d", props->name, props->port);
-        NCCL_OFI_TRACE(NCCL_NET, "%s: Device Maximum Communicators: %d", props->name, props->maxComms);
-        NCCL_OFI_TRACE(NCCL_NET, "%s: Device Maximum Grouped Receives: %d", props->name, props->maxRecvs);
-	NCCL_OFI_TRACE(NCCL_NET, "%s: Global registration: %d", props->name, props->regIsGlobal);
-}
-
-static inline int is_gdr_supported_nic(uint64_t ptr_support)
-{
-	if (ptr_support & NCCL_PTR_CUDA)
-		return 1;
-
-	return 0;
-}
-
-static inline ncclResult_t allocate_buff(void **buf, size_t size, int buffer_type)
-{
-	switch (buffer_type) {
-	case NCCL_PTR_CUDA:
-		NCCL_OFI_TRACE(NCCL_NET, "Allocating CUDA buffer");
-		CUDACHECK(cudaMalloc(buf, size));
-		break;
-	case NCCL_PTR_HOST:
-		NCCL_OFI_TRACE(NCCL_NET, "Allocating host buffer");
-		CUDACHECK(cudaHostAlloc(buf, size, cudaHostAllocMapped));
-		break;
-	default:
-		NCCL_OFI_WARN("Unidentified buffer type: %d", buffer_type);
-		return ncclInvalidArgument;
-	}
-
-	return ncclSuccess;
-}
-
-static inline ncclResult_t initialize_buff(void *buf, size_t size, int buffer_type)
-{
-	switch (buffer_type) {
-	case NCCL_PTR_CUDA:
-		CUDACHECK(cudaMemset(buf, '1', size));
-		break;
-	case NCCL_PTR_HOST:
-		memset(buf, '1', size);
-		break;
-	default:
-		NCCL_OFI_WARN("Unidentified buffer type: %d", buffer_type);
-		return ncclInvalidArgument;
-	}
-
-	return ncclSuccess;
-}
-
-static inline ncclResult_t deallocate_buffer(void *buf, int buffer_type)
-{
-	switch (buffer_type) {
-	case NCCL_PTR_CUDA:
-		CUDACHECK(cudaFree(buf));
-		break;
-	case NCCL_PTR_HOST:
-		CUDACHECK(cudaFreeHost((void *)buf));
-		break;
-	default:
-		NCCL_OFI_WARN("Unidentified buffer type: %d", buffer_type);
-		return ncclInvalidArgument;
-	}
-
-	return ncclSuccess;
-}
-
-static inline ncclResult_t validate_data(char *recv_buf, char *expected_buf, size_t size, int buffer_type)
-{
-	int ret = 0;
-	char *recv_buf_host = NULL;
-
-	switch (buffer_type) {
-	case NCCL_PTR_CUDA:
-		OFINCCLCHECK(allocate_buff((void **)&recv_buf_host, size, NCCL_PTR_HOST));
-		CUDACHECK(cudaMemcpy(recv_buf_host, recv_buf, size, cudaMemcpyDeviceToHost));
-
-		ret = memcmp(recv_buf_host, expected_buf, size);
-		if (ret != 0) {
-			NCCL_OFI_WARN("Data validation check failed. RC: %d, Buffer Type: %d",
-				      ret, buffer_type);
-			return ncclSystemError;
-		}
-		break;
-	case NCCL_PTR_HOST:
-		ret = memcmp(recv_buf, expected_buf, size);
-		if (ret != 0) {
-			NCCL_OFI_WARN("Data validation check failed. RC: %d, Buffer Type: %d",
-				      ret, buffer_type);
-			return ncclSystemError;
-		}
-		break;
-	default:
-		NCCL_OFI_WARN("Unidentified buffer type: %d", buffer_type);
-		return ncclInvalidArgument;
-	}
-
-	return ncclSuccess;
-}
-
-static test_nccl_net_t *get_extNet(void)
-{
-	void *netPluginLib = NULL;
-	test_nccl_net_t *extNet = NULL;
-
-	netPluginLib = dlopen("libnccl-net.so", RTLD_NOW | RTLD_LOCAL);
-	if (netPluginLib == NULL) {
-		NCCL_OFI_WARN("Unable to load libnccl-net.so: %s", dlerror());
-		return NULL;
-	}
-
-	extNet = (test_nccl_net_t *)dlsym(netPluginLib, STR(NCCL_PLUGIN_SYMBOL));
-	if (extNet == NULL) {
-		NCCL_OFI_WARN("NetPlugin, could not find %s symbol",
-			      STR(NCCL_PLUGIN_SYMBOL));
-	}
-
-	return extNet;
 }
 
 #endif // End TEST_COMMON_H_
