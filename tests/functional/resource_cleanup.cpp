@@ -443,7 +443,11 @@ static void* thread_worker(void* arg) {
 
 #if HAVE_CUDA
 	bool cuda_initialized = initialize_cuda_for_thread();
+	(void)cuda_initialized; // Mark as intentionally unused
 #endif
+	
+	(void)rank; // Mark as intentionally unused
+	(void)thread_id; // Mark as intentionally unused
 
 	thread_ctx->get_comm_ctx().set_device_id(thread_ctx->get_device_id());
 
@@ -656,7 +660,16 @@ int main(int argc, char* argv[]) {
 			return ncclInternalError;
 		}
 
+		// Add delay to allow complete cleanup before next device test
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		
 		MPI_Barrier(MPI_COMM_WORLD);
+		
+		// Additional barrier and delay for multi-device synchronization
+		if (dev_idx < ndev - 1) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(200));
+			MPI_Barrier(MPI_COMM_WORLD);
+		}
 	}
 
 	MPI_Barrier(MPI_COMM_WORLD);
