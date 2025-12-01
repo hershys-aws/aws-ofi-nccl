@@ -533,7 +533,12 @@ static inline ncclResult_t init_cuda_for_thread(int cuda_device)
  */
 static inline ncclResult_t mpi_init_ranks(int* rank, int* size, int* local_rank)
 {
-	MPI_Init(nullptr, nullptr);
+	int provided;
+	MPI_Init_thread(nullptr, nullptr, MPI_THREAD_MULTIPLE, &provided);
+	if (provided < MPI_THREAD_MULTIPLE) {
+		NCCL_OFI_WARN("MPI does not support MPI_THREAD_MULTIPLE (provided=%d)", provided);
+		return ncclSystemError;
+	}
 	MPI_Comm_rank(MPI_COMM_WORLD, rank);
 	MPI_Comm_size(MPI_COMM_WORLD, size);
 
@@ -759,7 +764,9 @@ struct ThreadContext {
 	// Per-device, per-test-size buffer management
 	std::vector<std::vector<TestBuffer>> test_buffers;  // [dev_idx][size_idx]
 
-	ThreadContext() {}
+	ThreadContext(size_t tid, test_nccl_net_t* net, void* scen, MPI_Comm comm)
+		: thread_id(tid), ext_net(net), result(ncclSuccess), scenario(scen), 
+		  thread_comm(comm), rank(-1), peer_rank(-1), ndev(0) {}
 
 	/**
 	 * Initialize buffer storage after ndev is known
@@ -864,14 +871,17 @@ struct ThreadContext {
 	{
 		if (idx < lcomms.size() && lcomms[idx] != nullptr) {
 			OFINCCLCHECK(ext_net->closeListen(static_cast<void*>(lcomms[idx])));
+			lcomms[idx] = nullptr;
 		}
 
 		if (idx < scomms.size() && scomms[idx] != nullptr) {
 			OFINCCLCHECK(ext_net->closeSend(static_cast<void*>(scomms[idx])));
+			scomms[idx] = nullptr;
 		}
 
 		if (idx < rcomms.size() && rcomms[idx] != nullptr) {
 			OFINCCLCHECK(ext_net->closeRecv(static_cast<void*>(rcomms[idx])));
+			rcomms[idx] = nullptr;
 		}
 
 		return ncclSuccess;
@@ -915,14 +925,12 @@ struct ThreadContext {
 	}
 
 	/**
-	 * Poll until all requests complete
+	 * Poll until all requests complete and validate data
 	 */
-	ncclResult_t poll_until_complete(std::array<void*, NUM_REQUESTS>& requests, int dev_idx, size_t size_idx)
+	ncclResult_t poll_and_validate(std::array<void*, NUM_REQUESTS>& requests, char** recv_buf, void** mhandle, 
+	                                 size_t send_size, size_t recv_size, int buffer_type, void* rComm)
 	{
-		NCCL_OFI_INFO(NCCL_NET, "Rank %d: Polling for completion on dev %d size_idx %zu", rank, dev_idx, size_idx);
-		
-		TestBuffer& tb = test_buffers[dev_idx][size_idx];
-		nccl_net_ofi_recv_comm_t* rComm = rcomms[dev_idx];
+		NCCL_OFI_INFO(NCCL_NET, "Rank %d: Polling for completion", rank);
 		
 		bool all_done = false;
 		int poll_count = 0;
@@ -933,14 +941,13 @@ struct ThreadContext {
 					int done = 0;
 					OFINCCLCHECK(ext_net->test(requests[req_idx], &done, nullptr));
 					if (done) {
-						NCCL_OFI_WARN("Rank %d: Request %d completed on dev %d size_idx %zu (poll_count=%d)", rank, req_idx, dev_idx, size_idx, poll_count);
 						requests[req_idx] = nullptr;
 						
 						// Rank 1: flush immediately after completion
-						if (rank == 1 && tb.buffer_type == NCCL_PTR_CUDA) {
+						if (rank == 1 && buffer_type == NCCL_PTR_CUDA) {
 							void* iflush_req = nullptr;
-							int sizes_int[1] = {(int)tb.recv_size};
-							OFINCCLCHECK(ext_net->iflush(rComm, 1, (void**)&tb.recv_bufs[req_idx].buffer, sizes_int, &tb.recv_bufs[req_idx].mhandle, &iflush_req));
+							int sizes_int[1] = {(int)recv_size};
+							OFINCCLCHECK(ext_net->iflush(rComm, 1, (void**)&recv_buf[req_idx], sizes_int, &mhandle[req_idx], &iflush_req));
 							if (iflush_req) {
 								int flush_done = 0;
 								while (!flush_done) {
@@ -956,82 +963,77 @@ struct ThreadContext {
 			poll_count++;
 		}
 		
-		
-		// Ensure both sender and receiver complete before validation
-		NCCL_OFI_WARN("Rank %d: Entering barrier before validation (dev %d size_idx %zu)", rank, dev_idx, size_idx);
-		MPI_Barrier(thread_comm);
-		NCCL_OFI_WARN("Rank %d: Passed barrier (dev %d size_idx %zu)", rank, dev_idx, size_idx);
-		
 		// Validate after all requests complete (rank 1 only)
-		if (rank == 1 && !(tb.buffer_type == NCCL_PTR_CUDA && ofi_nccl_gdr_flush_disable())) {
-			size_t validate_size = std::min(tb.send_size, tb.recv_size);
+		if (rank == 1 && !(buffer_type == NCCL_PTR_CUDA && ofi_nccl_gdr_flush_disable())) {
+			size_t validate_size = std::min(send_size, recv_size);
 			char* expected_buf = nullptr;
 			OFINCCLCHECK(allocate_buff((void**)&expected_buf, validate_size, NCCL_PTR_HOST));
 			OFINCCLCHECK(initialize_buff(expected_buf, validate_size, NCCL_PTR_HOST));
 			for (int req_idx = 0; req_idx < NUM_REQUESTS; req_idx++) {
-				OFINCCLCHECK(validate_data(tb.recv_bufs[req_idx].buffer, expected_buf, validate_size, tb.buffer_type));
+				OFINCCLCHECK(validate_data(recv_buf[req_idx], expected_buf, validate_size, buffer_type));
 			}
 			OFINCCLCHECK(deallocate_buffer(expected_buf, NCCL_PTR_HOST));
 		}
 		
-		NCCL_OFI_INFO(NCCL_NET, "Rank %d: All requests completed after %d polls on dev %d size_idx %zu", rank, poll_count, dev_idx, size_idx);
+		NCCL_OFI_INFO(NCCL_NET, "Rank %d: All requests completed after %d polls", rank, poll_count);
 		return ncclSuccess;
 	}
 
 	/**
-	 * Test send/receive using pre-allocated buffers for a specific test size
+	 * Test send/receive with fresh buffer allocation per call (like master)
 	 */
-	ncclResult_t send_receive_test(int dev_idx, size_t size_idx)
+	ncclResult_t send_receive_test(int dev_idx, size_t size_idx, size_t send_size, size_t recv_size)
 	{
 		static constexpr int TAG = 1;
 		static constexpr int NRECV = NCCL_OFI_MAX_RECVS;
 
-		TestBuffer& tb = test_buffers[dev_idx][size_idx];
-		size_t send_size = tb.send_size;
-		size_t recv_size = tb.recv_size;
-
-		NCCL_OFI_INFO(NCCL_NET, "Rank %d: Testing send_size=%lu, recv_size=%lu on dev %d (size_idx=%zu)", 
-		              rank, send_size, recv_size, dev_idx, size_idx);
-		NCCL_OFI_INFO(NCCL_NET, "Rank %d: send_bufs.size()=%zu, recv_bufs.size()=%zu", 
-		              rank, tb.send_bufs.size(), tb.recv_bufs.size());
-
 		nccl_net_ofi_send_comm_t* sComm = scomms[dev_idx];
 		nccl_net_ofi_recv_comm_t* rComm = rcomms[dev_idx];
+		
+		// Determine buffer type based on GDR support
+		auto gdr_support = get_support_gdr(ext_net);
+		int buffer_type = gdr_support[dev_idx] ? NCCL_PTR_CUDA : NCCL_PTR_HOST;
 
+		// Local buffer arrays
+		char* send_buf[NUM_REQUESTS] = {nullptr};
+		char* recv_buf[NUM_REQUESTS] = {nullptr};
+		void* mhandle[NUM_REQUESTS] = {nullptr};
 		std::array<void*, NUM_REQUESTS> requests{};
 
 		if (rank == 0) {
-			// Initialize and post sends
-			NCCL_OFI_WARN("Rank 0: Starting to post %zu sends for dev %d size_idx %zu", tb.send_bufs.size(), dev_idx, size_idx);
-			for (size_t req_idx = 0; req_idx < tb.send_bufs.size(); req_idx++) {
-				NCCL_OFI_TRACE(NCCL_NET, "Rank 0: Initializing send buffer %zu for dev %d size_idx %zu", req_idx, dev_idx, size_idx);
-				OFINCCLCHECK(initialize_buff(tb.send_bufs[req_idx].buffer, send_size, tb.buffer_type));
-				NCCL_OFI_TRACE(NCCL_NET, "Rank 0: Posting send %zu for dev %d size_idx %zu", req_idx, dev_idx, size_idx);
-				OFINCCLCHECK(post_send(ext_net, sComm, tb.send_bufs[req_idx].buffer, send_size, TAG, tb.send_bufs[req_idx].mhandle, &requests[req_idx]));
+			// Allocate and post sends
+			for (int idx = 0; idx < NUM_REQUESTS; idx++) {
+				OFINCCLCHECK(allocate_buff((void**)&send_buf[idx], send_size, buffer_type));
+				OFINCCLCHECK(initialize_buff(send_buf[idx], send_size, buffer_type));
+				OFINCCLCHECK(ext_net->regMr(sComm, send_buf[idx], send_size, buffer_type, &mhandle[idx]));
+				OFINCCLCHECK(post_send(ext_net, sComm, send_buf[idx], send_size, TAG, mhandle[idx], &requests[idx]));
 			}
-			NCCL_OFI_WARN("Rank 0: Posted all %zu sends for dev %d size_idx %zu", tb.send_bufs.size(), dev_idx, size_idx);
 		} else {
-			// Post receives
-			NCCL_OFI_WARN("Rank 1: Starting to post %zu recvs for dev %d size_idx %zu", tb.recv_bufs.size(), dev_idx, size_idx);
+			// Allocate and post receives
 			std::array<size_t, NRECV> sizes;
 			std::array<int, NRECV> tags;
 			std::fill(sizes.begin(), sizes.end(), recv_size);
 			std::fill(tags.begin(), tags.end(), TAG);
 
-			for (size_t req_idx = 0; req_idx < tb.recv_bufs.size(); req_idx++) {
-				NCCL_OFI_TRACE(NCCL_NET, "Rank 1: Posting recv %zu for dev %d size_idx %zu", req_idx, dev_idx, size_idx);
-				OFINCCLCHECK(post_recv(ext_net, rComm, NRECV, reinterpret_cast<void**>(&tb.recv_bufs[req_idx].buffer),
-				                       sizes.data(), tags.data(), &tb.recv_bufs[req_idx].mhandle, &requests[req_idx]));
+			for (int idx = 0; idx < NUM_REQUESTS; idx++) {
+				OFINCCLCHECK(allocate_buff((void**)&recv_buf[idx], recv_size, buffer_type));
+				OFINCCLCHECK(ext_net->regMr(rComm, recv_buf[idx], recv_size, buffer_type, &mhandle[idx]));
+				OFINCCLCHECK(post_recv(ext_net, rComm, NRECV, (void**)&recv_buf[idx], sizes.data(), tags.data(), &mhandle[idx], &requests[idx]));
 			}
-			NCCL_OFI_WARN("Rank 1: Posted all %zu recvs for dev %d size_idx %zu", tb.recv_bufs.size(), dev_idx, size_idx);
 		}
-		
-		// Ensure both ranks finish posting before either starts polling
-		// This matches master's behavior where both ranks reach the polling loop together
-		MPI_Barrier(thread_comm);
 
-		// Poll for completion
-		OFINCCLCHECK(poll_until_complete(requests, dev_idx, size_idx));
+		// Poll for completion with validation
+		OFINCCLCHECK(poll_and_validate(requests, recv_buf, mhandle, send_size, recv_size, buffer_type, rComm));
+
+		// Cleanup
+		for (int idx = 0; idx < NUM_REQUESTS; idx++) {
+			if (mhandle[idx]) {
+				if (rank == 0) ext_net->deregMr(sComm, mhandle[idx]);
+				else ext_net->deregMr(rComm, mhandle[idx]);
+			}
+			if (send_buf[idx]) deallocate_buffer(send_buf[idx], buffer_type);
+			if (recv_buf[idx]) deallocate_buffer(recv_buf[idx], buffer_type);
+		}
 
 		return ncclSuccess;
 	}
@@ -1117,10 +1119,10 @@ struct ThreadContext {
  */
 class TestScenario {
 public:
-	TestScenario(std::string&& scenario_name, size_t num_threads_per_process = 0)
-	: name(std::move(scenario_name)) {
+	TestScenario(std::string&& scenario_name, size_t num_threads_per_process = 0, size_t num_iterations = 1)
+	: name(std::move(scenario_name)), iterations(num_iterations) {
 		threads.resize(num_threads_per_process);
-		thread_contexts.resize(num_threads_per_process);
+		// thread_contexts will be populated in execute() via emplace_back
 	}
 
 	virtual ~TestScenario() = default;
@@ -1166,30 +1168,25 @@ public:
 		for (size_t i = 0; i < ctx.lcomms.size(); i++) {
 			OFINCCLCHECK(ctx.cleanup_connection(i));
 		}
-
-		MPI_Barrier(ctx.thread_comm);
-		MPI_Comm_free(&ctx.thread_comm);
 		return ncclSuccess;
 	}
 
 	ncclResult_t execute() {
 		NCCL_OFI_INFO(NCCL_NET, "Running: %s", this->name.c_str());
 
+		// Clear any stale contexts from previous test runs
+		thread_contexts.clear();
+
 		// Single-threaded: create context and execute on main thread
 		if (threads.size() == 0) {
-			thread_contexts.resize(1);
-			thread_contexts[0].thread_id = 0;
-			thread_contexts[0].ext_net = ext_net;
-			thread_contexts[0].scenario = this;
-			thread_contexts[0].result = ncclSuccess;
+			thread_contexts.emplace_back(0, ext_net, this, MPI_COMM_WORLD);
 
-			int rank;
-			MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-			MPI_Comm_split(MPI_COMM_WORLD, 0, rank, &thread_contexts[0].thread_comm);
-
-			OFINCCLCHECK(setup(thread_contexts[0]));
-			OFINCCLCHECK(run(thread_contexts[0]));
-			OFINCCLCHECK(teardown(thread_contexts[0]));
+			for (size_t iter = 0; iter < iterations; iter++) {
+				OFINCCLCHECK(setup(thread_contexts[0]));
+				OFINCCLCHECK(run(thread_contexts[0]));
+				OFINCCLCHECK(teardown(thread_contexts[0]));
+				MPI_Barrier(MPI_COMM_WORLD);
+			}
 			return thread_contexts[0].result;
 		}
 
@@ -1197,12 +1194,10 @@ public:
 		int rank;
 		MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-		for (size_t i = 0; i < thread_contexts.size(); i++) {
-			thread_contexts[i].thread_id = i;
-			thread_contexts[i].ext_net = ext_net;
-			thread_contexts[i].scenario = this;
-			thread_contexts[i].result = ncclSuccess;
-			MPI_Comm_split(MPI_COMM_WORLD, i, rank, &thread_contexts[i].thread_comm);
+		for (size_t i = 0; i < threads.size(); i++) {
+			MPI_Comm comm;
+			MPI_Comm_split(MPI_COMM_WORLD, i, rank, &comm);
+			thread_contexts.emplace_back(i, ext_net, this, comm);
 		}
 
 		// Create threads
@@ -1250,24 +1245,40 @@ protected:
 
 		ncclResult_t result = ncclSuccess;
 
-		// Execute the sequence - continue to teardown even if setup/run fails
-		if ((result = scenario->setup(*ctx)) != ncclSuccess) {
-			NCCL_OFI_WARN("Thread %zu setup failed", ctx->thread_id);
-			ctx->result = result;
-		}
-
-		if (result == ncclSuccess && (result = scenario->run(*ctx)) != ncclSuccess) {
-			NCCL_OFI_WARN("Thread %zu run failed", ctx->thread_id);
-			ctx->result = result;
-		}
-
-		// Always call teardown to ensure cleanup happens
-		ncclResult_t teardown_result = scenario->teardown(*ctx);
-		if (teardown_result != ncclSuccess) {
-			NCCL_OFI_WARN("Thread %zu teardown failed", ctx->thread_id);
-			if (result == ncclSuccess) {
-				ctx->result = teardown_result;
+		// Execute iterations
+		for (size_t iter = 0; iter < scenario->iterations; iter++) {
+			// Execute the sequence - continue to teardown even if setup/run fails
+			if ((result = scenario->setup(*ctx)) != ncclSuccess) {
+				NCCL_OFI_WARN("Thread %zu setup failed on iteration %zu", ctx->thread_id, iter);
+				ctx->result = result;
 			}
+
+			if (result == ncclSuccess && (result = scenario->run(*ctx)) != ncclSuccess) {
+				NCCL_OFI_WARN("Thread %zu run failed on iteration %zu", ctx->thread_id, iter);
+				ctx->result = result;
+			}
+
+			// Always call teardown to ensure cleanup happens
+			ncclResult_t teardown_result = scenario->teardown(*ctx);
+			if (teardown_result != ncclSuccess) {
+				NCCL_OFI_WARN("Thread %zu teardown failed on iteration %zu", ctx->thread_id, iter);
+				if (result == ncclSuccess) {
+					ctx->result = teardown_result;
+				}
+			}
+
+			// Barrier between iterations
+			MPI_Barrier(ctx->thread_comm);
+
+			// If any step failed, break out of iteration loop
+			if (result != ncclSuccess) {
+				break;
+			}
+		}
+
+		// Free thread communicator after all iterations complete
+		if (ctx->thread_comm != MPI_COMM_WORLD) {
+			MPI_Comm_free(&ctx->thread_comm);
 		}
 
 		// Set final result if not already set
@@ -1282,6 +1293,7 @@ protected:
 	std::string name;
 	std::vector<ThreadContext> thread_contexts;
 	std::vector<pthread_t> threads;
+	size_t iterations;
 
 };
 
@@ -1348,6 +1360,8 @@ public:
 			if (test->execute() == ncclSuccess) {
 				passed++;
 			}
+			// Ensure all ranks complete test before starting next one
+			MPI_Barrier(MPI_COMM_WORLD);
 		}
 
 		OFINCCLCHECK(teardown());

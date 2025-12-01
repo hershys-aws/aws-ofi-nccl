@@ -15,7 +15,8 @@
 class MessageTransferTest : public TestScenario {
 
 public:
-	explicit MessageTransferTest(size_t num_threads = 0) : TestScenario("NCCL Message Transfer Test", num_threads) {
+	explicit MessageTransferTest(size_t num_threads = 0, size_t num_iterations = 1) 
+		: TestScenario("NCCL Message Transfer Test", num_threads, num_iterations) {
 		// Test all sizes
 	}
 
@@ -27,17 +28,6 @@ public:
 		OFINCCLCHECK(TestScenario::setup(ctx));
 
 		NCCL_OFI_INFO(NCCL_NET, "Thread %zu: rank %d completed connection setup", ctx.thread_id, ctx.rank);
-		
-		// Initialize buffer storage with test sizes
-		ctx.initialize_buffer_storage(SEND_RECV_SIZES);
-		
-		// Allocate buffers for each device
-		for (size_t dev_idx = 0; dev_idx < ctx.lcomms.size(); dev_idx++) {
-			auto dev = (ctx.rank == 1) ? ctx.ndev - dev_idx - 1 : dev_idx;
-			auto gdr_support = get_support_gdr(ext_net);
-			int buffer_type = gdr_support[dev] ? NCCL_PTR_CUDA : NCCL_PTR_HOST;
-			OFINCCLCHECK(ctx.allocate_test_buffers(dev_idx, buffer_type));
-		}
 		
 		return ncclSuccess;
 	}
@@ -65,11 +55,8 @@ public:
 					continue;
 				}
 
-				// Run test with pre-allocated buffers (poll_until_complete ensures no data in flight)
-				OFINCCLCHECK(ctx.send_receive_test(dev_idx, size_idx));
-				
-				// Workaround: Ensure both sender and receiver complete before validation
-				MPI_Barrier(ctx.thread_comm);
+				// Run test with fresh buffers allocated per call
+				OFINCCLCHECK(ctx.send_receive_test(dev_idx, size_idx, send_size, recv_size));
 				
 				NCCL_OFI_INFO(NCCL_NET, "Rank %d completed size %lu->%lu on dev %lu", ctx.rank, send_size, recv_size, dev_idx);
 			}
@@ -80,11 +67,6 @@ public:
 	}
 
 	ncclResult_t teardown(ThreadContext& ctx) override {
-		// Deallocate buffers for each device
-		for (size_t dev_idx = 0; dev_idx < ctx.lcomms.size(); dev_idx++) {
-			OFINCCLCHECK(ctx.deallocate_test_buffers(dev_idx));
-		}
-		
 		// Base class cleans up connections
 		return TestScenario::teardown(ctx);
 	}
@@ -109,10 +91,10 @@ int main(int argc, char* argv[])
 {
 	ofi_log_function = logger;
 	TestSuite suite;
-	MessageTransferTest test;  // Single-threaded test only
-	// MessageTransferTest mt_test(4);  // Disabled for now
+	MessageTransferTest test;
+	MessageTransferTest mt_test(4, 10);  // Test with 10 iterations
 	suite.add(&test);
-	// suite.add(&mt_test);  // Disabled for now
+	suite.add(&mt_test);
 	return suite.run_all();
 }
 

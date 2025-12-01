@@ -11,160 +11,129 @@
 
 class ReuseListenCommTest : public TestScenario {
 public:
-	explicit ReuseListenCommTest(size_t num_threads = 0) : TestScenario("Reuse Listen Comm Test", num_threads) {}
+	explicit ReuseListenCommTest(size_t num_threads = 0, size_t num_iterations = 1)
+		: TestScenario("Reuse Listen Comm Test", num_threads, num_iterations) {
+		size_t num_contexts = (num_threads == 0) ? 1 : num_threads;
+		thread_iteration_counts.resize(num_contexts, 0);
+		peer_handles.resize(num_contexts);
+	}
 
 	ncclResult_t setup(ThreadContext& ctx) override {
-		OFINCCLCHECK(TestScenario::setup(ctx));
-
-		MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-		peer_rank = (rank == 0) ? 1 : 0;
-
 		OFINCCLCHECK(init_cuda_for_thread(0));
-		OFINCCLCHECK(ext_net->devices(&ndev));
-
+		
+		// First iteration: create listen comms and exchange handles
+		if (ctx.lcomms.empty()) {
+			// Initialize ctx fields (rank, peer_rank, ndev, device_map)
+			MPI_Comm_rank(ctx.thread_comm, &ctx.rank);
+			ctx.peer_rank = (ctx.rank == 0) ? 1 : 0;
+			OFINCCLCHECK(ext_net->devices(&ctx.ndev));
+			
+			ctx.device_map.resize(ctx.ndev);
+			for (int dev_idx = 0; dev_idx < ctx.ndev; dev_idx++) {
+				ctx.device_map[dev_idx] = (ctx.rank == 1) ? ctx.ndev - dev_idx - 1 : dev_idx;
+			}
+			
+			// Resize vectors
+			ctx.lcomms.resize(ctx.ndev, nullptr);
+			ctx.scomms.resize(ctx.ndev, nullptr);
+			ctx.rcomms.resize(ctx.ndev, nullptr);
+			ctx.shandles.resize(ctx.ndev, nullptr);
+			ctx.rhandles.resize(ctx.ndev, nullptr);
+			peer_handles[ctx.thread_id].resize(ctx.ndev);
+			
+			// Create listen comms and exchange handles
+			for (int dev_idx = 0; dev_idx < ctx.ndev; dev_idx++) {
+				int physical_dev = ctx.device_map[dev_idx];
+				char local_handle[NCCL_NET_HANDLE_MAXSIZE] = {};
+				
+				// Create listen comm
+				OFINCCLCHECK(ext_net->listen(physical_dev, &local_handle,
+											reinterpret_cast<void**>(&ctx.lcomms[dev_idx])));
+				
+				// Exchange and store peer handles
+				MPI_Status status;
+				MPI_Sendrecv(local_handle, NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, ctx.peer_rank, 0,
+							peer_handles[ctx.thread_id][dev_idx].data(), NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, 
+							ctx.peer_rank, 0, ctx.thread_comm, &status);
+			}
+		}
+		
+		// Every iteration: create send/recv from existing listen comm
+		for (int dev_idx = 0; dev_idx < ctx.ndev; dev_idx++) {
+			int physical_dev = ctx.device_map[dev_idx];
+			
+			// Copy peer handle to local variable to avoid corruption by connect()
+			// The plugin modifies handle->state.comm, so we need a fresh copy each iteration
+			char peer_handle_copy[NCCL_NET_HANDLE_MAXSIZE];
+			memcpy(peer_handle_copy, peer_handles[ctx.thread_id][dev_idx].data(), NCCL_NET_HANDLE_MAXSIZE);
+			
+			// Poll until both send and recv comms are created
+			while (ctx.scomms[dev_idx] == nullptr || ctx.rcomms[dev_idx] == nullptr) {
+				if (ctx.scomms[dev_idx] == nullptr) {
+					OFINCCLCHECK(ext_net->connect(physical_dev, peer_handle_copy,
+												 reinterpret_cast<void**>(&ctx.scomms[dev_idx]), 
+												 &ctx.shandles[dev_idx]));
+				}
+				if (ctx.rcomms[dev_idx] == nullptr) {
+					OFINCCLCHECK(ext_net->accept(ctx.lcomms[dev_idx],
+												reinterpret_cast<void**>(&ctx.rcomms[dev_idx]),
+												&ctx.rhandles[dev_idx]));
+				}
+			}
+		}
+		
 		return ncclSuccess;
 	}
 
 	ncclResult_t run(ThreadContext& ctx) override {
-		auto gdr_support = get_support_gdr(ext_net);
-
-		for (int dev_idx = 0; dev_idx < ndev; dev_idx++) {
-			int dev = (rank == 1) ? ndev - dev_idx - 1 : dev_idx;
-
-			NCCL_OFI_TRACE(NCCL_INIT, "Thread %zu: Rank %d testing device %d", 
-			               ctx.thread_id, rank, dev);
-
-			char handle[NCCL_NET_HANDLE_MAXSIZE];
-			char src_handle[NCCL_NET_HANDLE_MAXSIZE] = {};
-			nccl_net_ofi_listen_comm_t *lComm = nullptr;
-
-			// Create listen communicator
-			NCCL_OFI_INFO(NCCL_NET, "Thread %zu: Server listening on dev %d", ctx.thread_id, dev);
-			OFINCCLCHECK(ext_net->listen(dev, (void *)&handle, (void **)&lComm));
-
-			// Exchange handles
-			if (rank == 0) {
-				MPI_Recv((void *)src_handle, NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR,
-					 peer_rank, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-			} else {
-				MPI_Send((void *)handle, NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR,
-					 peer_rank, 0, MPI_COMM_WORLD);
-			}
-
-			// Run multiple iterations reusing the same listen communicator
-			for (int i = 0; i < NUM_LCOMM_REUSE_ITERS; ++i) {
-				char src_handle_iter[NCCL_NET_HANDLE_MAXSIZE];
-				memcpy(src_handle_iter, src_handle, NCCL_NET_HANDLE_MAXSIZE);
-
-				OFINCCLCHECK(run_iteration(dev, gdr_support[dev], lComm,
-							   (void *)src_handle_iter, peer_rank));
-			}
-
-			// Close listen communicator
-			if (lComm) {
-				OFINCCLCHECK(ext_net->closeListen((void *)lComm));
-			}
-
-			MPI_Barrier(MPI_COMM_WORLD);
+		for (size_t dev_idx = 0; dev_idx < ctx.lcomms.size(); dev_idx++) {
+			OFINCCLCHECK(ctx.send_receive_test(dev_idx, 0, DATA_SIZE, DATA_SIZE));
 		}
+		return ncclSuccess;
+	}
 
+	ncclResult_t teardown(ThreadContext& ctx) override {
+		// Close send/recv comms
+		for (size_t i = 0; i < ctx.scomms.size(); i++) {
+			if (ctx.scomms[i]) {
+				OFINCCLCHECK(ext_net->closeSend(ctx.scomms[i]));
+				ctx.scomms[i] = nullptr;
+				ctx.shandles[i] = nullptr;
+			}
+			if (ctx.rcomms[i]) {
+				OFINCCLCHECK(ext_net->closeRecv(ctx.rcomms[i]));
+				ctx.rcomms[i] = nullptr;
+				ctx.rhandles[i] = nullptr;
+			}
+		}
+		
+		// Track iterations and close listen comms on last iteration
+		thread_iteration_counts[ctx.thread_id]++;
+		if (thread_iteration_counts[ctx.thread_id] == iterations) {
+			for (size_t i = 0; i < ctx.lcomms.size(); i++) {
+				if (ctx.lcomms[i]) {
+					OFINCCLCHECK(ext_net->closeListen(ctx.lcomms[i]));
+					ctx.lcomms[i] = nullptr;
+				}
+			}
+		}
+		
 		return ncclSuccess;
 	}
 
 private:
-	static constexpr int NUM_LCOMM_REUSE_ITERS = 10;
-
-	ncclResult_t run_iteration(int dev, int test_support_gdr,
-				   nccl_net_ofi_listen_comm_t *lComm,
-				   void *src_handle, int target_rank)
-	{
-		nccl_net_ofi_send_comm_t *sComm = nullptr;
-		nccl_net_ofi_recv_comm_t *rComm = nullptr;
-		test_nccl_net_device_handle_t *s_handle = nullptr, *r_handle = nullptr;
-		int buffer_type = test_support_gdr ? NCCL_PTR_CUDA : NCCL_PTR_HOST;
-
-		if (test_support_gdr) {
-			NCCL_OFI_INFO(NCCL_INIT | NCCL_NET, "Device %d supports CUDA buffers", dev);
-		}
-
-		// Establish connection using existing listen communicator
-		if (rank == 0) {
-			while (sComm == nullptr) {
-				OFINCCLCHECK(ext_net->connect(dev, src_handle, (void **)&sComm, &s_handle));
-			}
-			NCCL_OFI_INFO(NCCL_NET, "Successfully connected to rank %d", target_rank);
-		} else {
-			while (rComm == nullptr) {
-				OFINCCLCHECK(ext_net->accept((void *)lComm, (void **)&rComm, &r_handle));
-			}
-			NCCL_OFI_INFO(NCCL_NET, "Successfully accepted connection from rank %d", target_rank);
-		}
-
-		// Perform data transfer (simplified version)
-		const size_t data_size = 1024 * 1024;
-		const int tag = 1;
-		const int nrecv = NCCL_OFI_MAX_RECVS;
-
-		// Just do a simple send/recv without the full NUM_REQUESTS loop to avoid complexity
-		if (rank == 0) {
-			void *send_buf, *mhandle;
-			void *req = nullptr;
-
-			OFINCCLCHECK(allocate_buff(&send_buf, data_size, buffer_type));
-			OFINCCLCHECK(initialize_buff(send_buf, data_size, buffer_type));
-			OFINCCLCHECK(register_memory(ext_net, sComm, send_buf, data_size, buffer_type, &mhandle));
-
-			while (req == nullptr) {
-				OFINCCLCHECK(post_send(ext_net, sComm, send_buf, data_size, tag, mhandle, &req));
-			}
-
-			int done = 0;
-			while (!done) {
-				OFINCCLCHECK(test_request(ext_net, req, &done, nullptr));
-			}
-
-			OFINCCLCHECK(deregister_memory(ext_net, sComm, mhandle));
-			OFINCCLCHECK(deallocate_buffer(send_buf, buffer_type));
-		} else {
-			void *recv_buf, *mhandle;
-			void *req = nullptr;
-			size_t sizes[nrecv] = {data_size};
-			int tags[nrecv] = {tag};
-
-			OFINCCLCHECK(allocate_buff(&recv_buf, data_size, buffer_type));
-			OFINCCLCHECK(register_memory(ext_net, rComm, recv_buf, data_size, buffer_type, &mhandle));
-
-			void* recv_bufs[] = {recv_buf};
-			void* mhandles[] = {mhandle};
-			while (req == nullptr) {
-				OFINCCLCHECK(post_recv(ext_net, rComm, nrecv, recv_bufs, sizes, tags, mhandles, &req));
-			}
-
-			int done = 0;
-			while (!done) {
-				OFINCCLCHECK(test_request(ext_net, req, &done, nullptr));
-			}
-
-			OFINCCLCHECK(deregister_memory(ext_net, rComm, mhandle));
-			OFINCCLCHECK(deallocate_buffer(recv_buf, buffer_type));
-		}
-
-		// Close only send/receive communicators (NOT the listen communicator - that's reused!)
-		if (sComm) OFINCCLCHECK(ext_net->closeSend((void *)sComm));
-		if (rComm) OFINCCLCHECK(ext_net->closeRecv((void *)rComm));
-
-		return ncclSuccess;
-	}
-
-	int ndev, rank, peer_rank;
+	std::vector<size_t> thread_iteration_counts;
+	// Store peer handles per thread per device: [thread_id][dev_idx]
+	std::vector<std::vector<std::array<char, NCCL_NET_HANDLE_MAXSIZE>>> peer_handles;
+	static constexpr size_t DATA_SIZE = 1024 * 1024;
 };
 
 int main(int argc, char* argv[])
 {
 	ofi_log_function = logger;
 	TestSuite suite;
-	ReuseListenCommTest test;
-	ReuseListenCommTest mt_test(4);
+	ReuseListenCommTest test(0, 10);      // single-threaded, 10 iterations
+	ReuseListenCommTest mt_test(4, 10);   // 4 threads, 10 iterations each
 	suite.add(&test);
 	suite.add(&mt_test);
 	return suite.run_all();
