@@ -570,6 +570,7 @@ static inline int inc_req_completion(nccl_net_ofi_rdma_req_t *req,
 	if (ncompls == total_ncompls &&
 	    OFI_LIKELY(req->state != NCCL_OFI_RDMA_REQ_ERROR)) {
 		req->state = NCCL_OFI_RDMA_REQ_COMPLETED;
+		NCCL_OFI_INFO(NCCL_NET, "RDMA req %p type=%d marked COMPLETED (ncompls=%d)", req, req->type, ncompls);
 
 		/* Trace this completion */
 		NCCL_OFI_TRACE_COMPLETIONS(req->dev_id, req->type, req, req);
@@ -706,6 +707,7 @@ static inline int inc_recv_seg_completion(nccl_net_ofi_rdma_req_t *req,
 
 		/* Total number of completions have arrived */
 		req->state = NCCL_OFI_RDMA_REQ_COMPLETED;
+		NCCL_OFI_INFO(NCCL_NET, "RDMA recv request %p marked COMPLETED (segms_received)", req);
 
 		/* Release lock of receive segment request before
 		 * receive request is set to completed to avoid
@@ -2456,6 +2458,8 @@ static int test(nccl_net_ofi_req_t *base_req, int *done, int *size)
 
 	/* Determine whether the request has finished without error and free if done */
 	if (OFI_LIKELY(req->state == NCCL_OFI_RDMA_REQ_COMPLETED)) {
+
+		NCCL_OFI_INFO(NCCL_NET, "test() returning done=1 for req %p type=%d", req, req->type);
 
 		size_t req_size;
 		nccl_net_ofi_mutex_lock(&req->req_lock);

@@ -7,6 +7,7 @@
 
 #include "config.h"
 
+#include <array>
 #include <dlfcn.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -226,6 +227,14 @@ static inline ncclResult_t validate_data(char *recv_buf, char *expected_buf, siz
 
 		ret = memcmp(recv_buf_host, expected_buf, size);
 		if (ret != 0) {
+			// Find first mismatch
+			for (size_t i = 0; i < size; i++) {
+				if (recv_buf_host[i] != expected_buf[i]) {
+					NCCL_OFI_WARN("Data validation failed at byte %zu: recv=0x%02x expected=0x%02x (size=%zu)",
+						      i, (unsigned char)recv_buf_host[i], (unsigned char)expected_buf[i], size);
+					break;
+				}
+			}
 			NCCL_OFI_WARN("Data validation check failed. RC: %d, Buffer Type: %d",
 				      ret, buffer_type);
 			return ncclSystemError;
@@ -620,21 +629,494 @@ inline test_nccl_net_t *get_extNet(void)
 }
 
 /**
+ * RAII wrapper for buffer allocation and registration
+ */
+class BufferHandle {
+public:
+	char* buffer = nullptr;
+	void* mhandle = nullptr;
+	size_t size = 0;
+	int type = 0;
+	void* comm = nullptr;
+	test_nccl_net_t* ext_net = nullptr;
+
+	BufferHandle() = default;
+
+	BufferHandle(size_t sz, int tp, void* cm, test_nccl_net_t* net)
+		: size(sz), type(tp), comm(cm), ext_net(net) {
+		if (allocate_buff((void**)&buffer, size, type) != ncclSuccess) {
+			throw std::runtime_error("BufferHandle: Failed to allocate buffer of size " + std::to_string(size));
+		}
+		if (ext_net->regMr(comm, buffer, size, type, &mhandle) != ncclSuccess) {
+			deallocate_buffer(buffer, type);
+			throw std::runtime_error("BufferHandle: Failed to register memory of size " + std::to_string(size));
+		}
+	}
+
+	~BufferHandle() {
+		if (mhandle && comm && ext_net) {
+			ext_net->deregMr(comm, mhandle);
+		}
+		if (buffer) {
+			deallocate_buffer(buffer, type);
+		}
+	}
+
+	// Move semantics
+	BufferHandle(BufferHandle&& other) noexcept
+		: buffer(other.buffer), mhandle(other.mhandle), size(other.size),
+		  type(other.type), comm(other.comm), ext_net(other.ext_net) {
+		other.buffer = nullptr;
+		other.mhandle = nullptr;
+		other.comm = nullptr;
+		other.ext_net = nullptr;
+	}
+
+	BufferHandle& operator=(BufferHandle&& other) noexcept {
+		if (this != &other) {
+			// Clean up existing resources
+			if (mhandle && comm && ext_net) {
+				ext_net->deregMr(comm, mhandle);
+			}
+			if (buffer) {
+				deallocate_buffer(buffer, type);
+			}
+
+			// Move from other
+			buffer = other.buffer;
+			mhandle = other.mhandle;
+			size = other.size;
+			type = other.type;
+			comm = other.comm;
+			ext_net = other.ext_net;
+
+			other.buffer = nullptr;
+			other.mhandle = nullptr;
+			other.comm = nullptr;
+			other.ext_net = nullptr;
+		}
+		return *this;
+	}
+
+	// Delete copy
+	BufferHandle(const BufferHandle&) = delete;
+	BufferHandle& operator=(const BufferHandle&) = delete;
+};
+
+/**
+ * Buffer set for a single test size
+ */
+struct TestBuffer {
+	size_t send_size;
+	size_t recv_size;
+	int buffer_type;
+	std::vector<BufferHandle> send_bufs;  // [req_idx]
+	std::vector<BufferHandle> recv_bufs;  // [req_idx]
+	bool validated;
+
+	TestBuffer() : send_size(0), recv_size(0), buffer_type(0), validated(false) {}
+
+	/**
+	 * Allocate buffers for this test size
+	 */
+	ncclResult_t allocate(int rank, int num_requests, int buf_type, 
+	                     void* send_comm, void* recv_comm, test_nccl_net_t* net) {
+		buffer_type = buf_type;
+		auto& bufs = (rank == 0) ? send_bufs : recv_bufs;
+		void* comm = (rank == 0) ? send_comm : recv_comm;
+		size_t size = (rank == 0) ? send_size : recv_size;
+
+		bufs.reserve(num_requests);
+		for (int i = 0; i < num_requests; i++) {
+			bufs.emplace_back(size, buf_type, comm, net);
+			// BufferHandle constructor throws on failure
+		}
+		return ncclSuccess;
+	}
+};
+
+/**
+ * Thread context structure for test scenarios
+ */
+struct ThreadContext {
+	size_t thread_id;
+	test_nccl_net_t* ext_net;
+	ListenComms lcomms;
+	SendComms scomms;
+	RecvComms rcomms;
+	ncclResult_t result;
+	void* scenario;  // Pointer to TestScenario, using void* to avoid circular dependency
+	MPI_Comm thread_comm;
+	int rank;
+	int peer_rank;
+	int ndev;
+	std::vector<test_nccl_net_device_handle_t*> shandles;
+	std::vector<test_nccl_net_device_handle_t*> rhandles;
+
+	// Device mapping: dev_idx → physical_dev
+	std::vector<int> device_map;
+
+	// Per-device, per-test-size buffer management
+	std::vector<std::vector<TestBuffer>> test_buffers;  // [dev_idx][size_idx]
+
+	ThreadContext() {}
+
+	/**
+	 * Initialize buffer storage after ndev is known
+	 */
+	void initialize_buffer_storage(const std::vector<std::pair<size_t, size_t>>& test_sizes) {
+		test_buffers.resize(ndev);
+		for (int dev = 0; dev < ndev; dev++) {
+			test_buffers[dev].resize(test_sizes.size());
+			for (size_t i = 0; i < test_sizes.size(); i++) {
+				test_buffers[dev][i].send_size = test_sizes[i].first;
+				test_buffers[dev][i].recv_size = test_sizes[i].second;
+				// BufferHandles will be allocated later in allocate_test_buffers()
+			}
+		}
+		NCCL_OFI_INFO(NCCL_NET, "Rank %d: Initialized buffer storage for %d devices, %zu test sizes", rank, ndev, test_sizes.size());
+	}
+
+	/**
+	 * Setup connection for a specific device using context's own fields
+	 */
+	ncclResult_t setup_connection(int dev_idx, int size)
+	{
+		// Get physical device from mapping
+		int physical_dev = device_map[dev_idx];
+		
+		// Validate device index
+		if (physical_dev < 0 || physical_dev >= ndev) {
+			NCCL_OFI_WARN("Invalid physical device %d (ndev=%d)", physical_dev, ndev);
+			return ncclInvalidArgument;
+		}
+
+		// Validate peer rank
+		if (peer_rank < 0 || peer_rank >= size || peer_rank == rank) {
+			NCCL_OFI_WARN("Invalid peer rank %d (rank=%d, size=%d)",
+			peer_rank, rank, size);
+			return ncclInvalidArgument;
+		}
+
+		NCCL_OFI_TRACE(NCCL_INIT, "Rank %d setting up connection with rank %d on physical_dev=%d (dev_idx=%d)",
+			rank, peer_rank, physical_dev, dev_idx);
+
+		char local_handle[NCCL_NET_HANDLE_MAXSIZE] = {};
+		char peer_handle[NCCL_NET_HANDLE_MAXSIZE] = {};
+
+		nccl_net_ofi_listen_comm_t* lcomm = nullptr;
+		nccl_net_ofi_send_comm_t* scomm = nullptr;
+		nccl_net_ofi_recv_comm_t* rcomm = nullptr;
+		test_nccl_net_device_handle_t* shandle = nullptr;
+		test_nccl_net_device_handle_t* rhandle = nullptr;
+
+		// Create listen communicator
+		NCCL_OFI_TRACE(NCCL_INIT, "Rank %d: Creating listen communicator on physical device %d",
+			rank, physical_dev);
+		OFINCCLCHECK(ext_net->listen(physical_dev, static_cast<void*>(&local_handle),
+				      reinterpret_cast<void**>(&lcomm)));
+
+		// Exchange connection handles via MPI
+		MPI_Status status;
+		NCCL_OFI_TRACE(NCCL_INIT, "Rank %d: Exchanging handles with rank %d",
+			rank, peer_rank);
+		auto mpi_ret = MPI_Sendrecv(
+			local_handle, NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, peer_rank, 0,
+			peer_handle, NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, peer_rank, 0,
+			thread_comm, &status);
+		if (mpi_ret != MPI_SUCCESS) {
+			NCCL_OFI_WARN("MPI_Sendrecv failed with error %d", mpi_ret);
+			return ncclSystemError;
+		}
+		NCCL_OFI_TRACE(NCCL_INIT, "Rank %d: Establishing send and receive communicators",
+			rank);
+
+		// Establish send and receive communicators
+		while (scomm == nullptr || rcomm == nullptr) {
+			if (scomm == nullptr) {
+				OFINCCLCHECK(ext_net->connect(physical_dev, static_cast<void*>(peer_handle),
+					 reinterpret_cast<void**>(&scomm), &shandle));
+			}
+
+			if (rcomm == nullptr) {
+				OFINCCLCHECK(ext_net->accept(static_cast<void*>(lcomm),
+					reinterpret_cast<void**>(&rcomm), &rhandle));
+			}
+		}
+
+		// Store at dev_idx for consistent access across ranks
+		lcomms[dev_idx] = lcomm;
+		scomms[dev_idx] = scomm;
+		rcomms[dev_idx] = rcomm;
+		shandles[dev_idx] = shandle;
+		rhandles[dev_idx] = rhandle;
+
+		NCCL_OFI_TRACE(NCCL_INIT, "Rank %d: Successfully established connection with rank %d on physical_dev=%d (stored at dev_idx=%d)",
+			rank, peer_rank, physical_dev, dev_idx);
+
+		return ncclSuccess;
+	}
+
+	/**
+	 * Cleanup connection at specific index using context's own vectors
+	 */
+	ncclResult_t cleanup_connection(size_t idx)
+	{
+		if (idx < lcomms.size() && lcomms[idx] != nullptr) {
+			OFINCCLCHECK(ext_net->closeListen(static_cast<void*>(lcomms[idx])));
+		}
+
+		if (idx < scomms.size() && scomms[idx] != nullptr) {
+			OFINCCLCHECK(ext_net->closeSend(static_cast<void*>(scomms[idx])));
+		}
+
+		if (idx < rcomms.size() && rcomms[idx] != nullptr) {
+			OFINCCLCHECK(ext_net->closeRecv(static_cast<void*>(rcomms[idx])));
+		}
+
+		return ncclSuccess;
+	}
+
+	/**
+	 * Allocate and register test buffers for all test sizes on a specific device
+	 */
+	ncclResult_t allocate_test_buffers(int dev_idx, int buffer_type)
+	{
+		NCCL_OFI_INFO(NCCL_NET, "Rank %d: Allocating test buffers for dev %d, %zu test sizes, type=%d", 
+		              rank, dev_idx, test_buffers[dev_idx].size(), buffer_type);
+
+		nccl_net_ofi_send_comm_t* sComm = scomms[dev_idx];
+		nccl_net_ofi_recv_comm_t* rComm = rcomms[dev_idx];
+
+		for (auto& tb : test_buffers[dev_idx]) {
+			OFINCCLCHECK(tb.allocate(rank, NUM_REQUESTS, buffer_type, sComm, rComm, ext_net));
+		}
+
+		NCCL_OFI_INFO(NCCL_NET, "Rank %d: Allocated buffers for %zu test sizes on dev %d", rank, test_buffers[dev_idx].size(), dev_idx);
+		return ncclSuccess;
+	}
+
+	/**
+	 * Deallocate and deregister test buffers for all test sizes
+	 * BufferHandle destructors handle cleanup automatically
+	 */
+	ncclResult_t deallocate_test_buffers(int dev_idx)
+	{
+		NCCL_OFI_INFO(NCCL_NET, "Rank %d: Deallocating test buffers for dev %d", rank, dev_idx);
+
+		// Clearing vectors calls BufferHandle destructors which handle deregMr and deallocate_buffer
+		for (auto& tb : test_buffers[dev_idx]) {
+			tb.send_bufs.clear();
+			tb.recv_bufs.clear();
+		}
+
+		NCCL_OFI_INFO(NCCL_NET, "Rank %d: Deallocated test buffers for dev %d", rank, dev_idx);
+		return ncclSuccess;
+	}
+
+	/**
+	 * Poll until all requests complete
+	 */
+	ncclResult_t poll_until_complete(std::array<void*, NUM_REQUESTS>& requests, int dev_idx, size_t size_idx)
+	{
+		NCCL_OFI_INFO(NCCL_NET, "Rank %d: Polling for completion on dev %d size_idx %zu", rank, dev_idx, size_idx);
+		
+		TestBuffer& tb = test_buffers[dev_idx][size_idx];
+		nccl_net_ofi_recv_comm_t* rComm = rcomms[dev_idx];
+		
+		bool all_done = false;
+		int poll_count = 0;
+		while (!all_done) {
+			all_done = true;
+			for (int req_idx = 0; req_idx < NUM_REQUESTS; req_idx++) {
+				if (requests[req_idx] != nullptr) {
+					int done = 0;
+					OFINCCLCHECK(ext_net->test(requests[req_idx], &done, nullptr));
+					if (done) {
+						NCCL_OFI_WARN("Rank %d: Request %d completed on dev %d size_idx %zu (poll_count=%d)", rank, req_idx, dev_idx, size_idx, poll_count);
+						requests[req_idx] = nullptr;
+						
+						// Rank 1: flush immediately after completion
+						if (rank == 1 && tb.buffer_type == NCCL_PTR_CUDA) {
+							void* iflush_req = nullptr;
+							int sizes_int[1] = {(int)tb.recv_size};
+							OFINCCLCHECK(ext_net->iflush(rComm, 1, (void**)&tb.recv_bufs[req_idx].buffer, sizes_int, &tb.recv_bufs[req_idx].mhandle, &iflush_req));
+							if (iflush_req) {
+								int flush_done = 0;
+								while (!flush_done) {
+									OFINCCLCHECK(ext_net->test(iflush_req, &flush_done, nullptr));
+								}
+							}
+						}
+					} else {
+						all_done = false;
+					}
+				}
+			}
+			poll_count++;
+		}
+		
+		
+		// Ensure both sender and receiver complete before validation
+		NCCL_OFI_WARN("Rank %d: Entering barrier before validation (dev %d size_idx %zu)", rank, dev_idx, size_idx);
+		MPI_Barrier(thread_comm);
+		NCCL_OFI_WARN("Rank %d: Passed barrier (dev %d size_idx %zu)", rank, dev_idx, size_idx);
+		
+		// Validate after all requests complete (rank 1 only)
+		if (rank == 1 && !(tb.buffer_type == NCCL_PTR_CUDA && ofi_nccl_gdr_flush_disable())) {
+			size_t validate_size = std::min(tb.send_size, tb.recv_size);
+			char* expected_buf = nullptr;
+			OFINCCLCHECK(allocate_buff((void**)&expected_buf, validate_size, NCCL_PTR_HOST));
+			OFINCCLCHECK(initialize_buff(expected_buf, validate_size, NCCL_PTR_HOST));
+			for (int req_idx = 0; req_idx < NUM_REQUESTS; req_idx++) {
+				OFINCCLCHECK(validate_data(tb.recv_bufs[req_idx].buffer, expected_buf, validate_size, tb.buffer_type));
+			}
+			OFINCCLCHECK(deallocate_buffer(expected_buf, NCCL_PTR_HOST));
+		}
+		
+		NCCL_OFI_INFO(NCCL_NET, "Rank %d: All requests completed after %d polls on dev %d size_idx %zu", rank, poll_count, dev_idx, size_idx);
+		return ncclSuccess;
+	}
+
+	/**
+	 * Test send/receive using pre-allocated buffers for a specific test size
+	 */
+	ncclResult_t send_receive_test(int dev_idx, size_t size_idx)
+	{
+		static constexpr int TAG = 1;
+		static constexpr int NRECV = NCCL_OFI_MAX_RECVS;
+
+		TestBuffer& tb = test_buffers[dev_idx][size_idx];
+		size_t send_size = tb.send_size;
+		size_t recv_size = tb.recv_size;
+
+		NCCL_OFI_INFO(NCCL_NET, "Rank %d: Testing send_size=%lu, recv_size=%lu on dev %d (size_idx=%zu)", 
+		              rank, send_size, recv_size, dev_idx, size_idx);
+		NCCL_OFI_INFO(NCCL_NET, "Rank %d: send_bufs.size()=%zu, recv_bufs.size()=%zu", 
+		              rank, tb.send_bufs.size(), tb.recv_bufs.size());
+
+		nccl_net_ofi_send_comm_t* sComm = scomms[dev_idx];
+		nccl_net_ofi_recv_comm_t* rComm = rcomms[dev_idx];
+
+		std::array<void*, NUM_REQUESTS> requests{};
+
+		if (rank == 0) {
+			// Initialize and post sends
+			NCCL_OFI_WARN("Rank 0: Starting to post %zu sends for dev %d size_idx %zu", tb.send_bufs.size(), dev_idx, size_idx);
+			for (size_t req_idx = 0; req_idx < tb.send_bufs.size(); req_idx++) {
+				NCCL_OFI_TRACE(NCCL_NET, "Rank 0: Initializing send buffer %zu for dev %d size_idx %zu", req_idx, dev_idx, size_idx);
+				OFINCCLCHECK(initialize_buff(tb.send_bufs[req_idx].buffer, send_size, tb.buffer_type));
+				NCCL_OFI_TRACE(NCCL_NET, "Rank 0: Posting send %zu for dev %d size_idx %zu", req_idx, dev_idx, size_idx);
+				OFINCCLCHECK(post_send(ext_net, sComm, tb.send_bufs[req_idx].buffer, send_size, TAG, tb.send_bufs[req_idx].mhandle, &requests[req_idx]));
+			}
+			NCCL_OFI_WARN("Rank 0: Posted all %zu sends for dev %d size_idx %zu", tb.send_bufs.size(), dev_idx, size_idx);
+		} else {
+			// Post receives
+			NCCL_OFI_WARN("Rank 1: Starting to post %zu recvs for dev %d size_idx %zu", tb.recv_bufs.size(), dev_idx, size_idx);
+			std::array<size_t, NRECV> sizes;
+			std::array<int, NRECV> tags;
+			std::fill(sizes.begin(), sizes.end(), recv_size);
+			std::fill(tags.begin(), tags.end(), TAG);
+
+			for (size_t req_idx = 0; req_idx < tb.recv_bufs.size(); req_idx++) {
+				NCCL_OFI_TRACE(NCCL_NET, "Rank 1: Posting recv %zu for dev %d size_idx %zu", req_idx, dev_idx, size_idx);
+				OFINCCLCHECK(post_recv(ext_net, rComm, NRECV, reinterpret_cast<void**>(&tb.recv_bufs[req_idx].buffer),
+				                       sizes.data(), tags.data(), &tb.recv_bufs[req_idx].mhandle, &requests[req_idx]));
+			}
+			NCCL_OFI_WARN("Rank 1: Posted all %zu recvs for dev %d size_idx %zu", tb.recv_bufs.size(), dev_idx, size_idx);
+		}
+		
+		// Ensure both ranks finish posting before either starts polling
+		// This matches master's behavior where both ranks reach the polling loop together
+		MPI_Barrier(thread_comm);
+
+		// Poll for completion
+		OFINCCLCHECK(poll_until_complete(requests, dev_idx, size_idx));
+
+		return ncclSuccess;
+	}
+
+	/**
+	 * Flush all receive buffers for a device to ensure data visibility
+	 */
+	ncclResult_t flush_all_buffers(int dev_idx)
+	{
+		if (rank != 1) {
+			return ncclSuccess;  // Only receiver needs to flush
+		}
+
+		NCCL_OFI_INFO(NCCL_NET, "Rank 1: Flushing all buffers for dev %d", dev_idx);
+		nccl_net_ofi_recv_comm_t* rComm = rcomms[dev_idx];
+
+		for (size_t size_idx = 0; size_idx < test_buffers[dev_idx].size(); size_idx++) {
+			TestBuffer& tb = test_buffers[dev_idx][size_idx];
+			
+			if (tb.buffer_type == NCCL_PTR_CUDA) {
+				for (size_t req_idx = 0; req_idx < tb.recv_bufs.size(); req_idx++) {
+					void* iflush_req = nullptr;
+					int sizes_int[1] = {(int)tb.recv_size};
+					OFINCCLCHECK(ext_net->iflush(rComm, 1, (void**)&tb.recv_bufs[req_idx].buffer, sizes_int, &tb.recv_bufs[req_idx].mhandle, &iflush_req));
+					if (iflush_req) {
+						int done = 0;
+						while (!done) {
+							OFINCCLCHECK(ext_net->test(iflush_req, &done, nullptr));
+						}
+					}
+				}
+			}
+		}
+
+		NCCL_OFI_INFO(NCCL_NET, "Rank 1: Flushed all buffers for dev %d", dev_idx);
+		return ncclSuccess;
+	}
+
+	/**
+	 * Validate all test buffers after all tests complete
+	 */
+	ncclResult_t validate_all_tests(int dev_idx)
+	{
+		if (rank != 1) {
+			return ncclSuccess;  // Only receiver validates
+		}
+
+		NCCL_OFI_INFO(NCCL_NET, "Rank 1: Validating all test buffers for dev %d", dev_idx);
+
+		for (size_t size_idx = 0; size_idx < test_buffers[dev_idx].size(); size_idx++) {
+			TestBuffer& tb = test_buffers[dev_idx][size_idx];
+			
+			if (tb.validated) {
+				continue;  // Already validated
+			}
+
+			// Validate data
+			if (!(tb.buffer_type == NCCL_PTR_CUDA && ofi_nccl_gdr_flush_disable())) {
+				// Validate the actual data sent (min of send_size and recv_size)
+				size_t validate_size = std::min(tb.send_size, tb.recv_size);
+				char* expected_buf = nullptr;
+				OFINCCLCHECK(allocate_buff((void**)&expected_buf, validate_size, NCCL_PTR_HOST));
+				OFINCCLCHECK(initialize_buff(expected_buf, validate_size, NCCL_PTR_HOST));
+				for (size_t req_idx = 0; req_idx < tb.recv_bufs.size(); req_idx++) {
+					NCCL_OFI_INFO(NCCL_NET, "Rank 1: Validating buffer %zu for dev %d size_idx %zu (send_size=%zu, recv_size=%zu, validate_size=%zu)", 
+					              req_idx, dev_idx, size_idx, tb.send_size, tb.recv_size, validate_size);
+					OFINCCLCHECK(validate_data(tb.recv_bufs[req_idx].buffer, expected_buf, validate_size, tb.buffer_type));
+				}
+				OFINCCLCHECK(deallocate_buffer(expected_buf, NCCL_PTR_HOST));
+			}
+
+			tb.validated = true;
+			NCCL_OFI_INFO(NCCL_NET, "Rank 1: Validation passed for dev %d size_idx %zu", dev_idx, size_idx);
+		}
+
+		NCCL_OFI_INFO(NCCL_NET, "Rank 1: All validations passed for dev %d", dev_idx);
+		return ncclSuccess;
+	}
+};
+
+/**
  * Simple test scenario class
  */
 class TestScenario {
 public:
-	struct ThreadContext {
-		size_t thread_id;
-		test_nccl_net_t* ext_net;
-		ListenComms lcomms;
-		SendComms scomms;
-		RecvComms rcomms;
-		ncclResult_t result;
-		TestScenario* scenario;
-		MPI_Comm thread_comm;
-	};
-
 	TestScenario(std::string&& scenario_name, size_t num_threads_per_process = 0)
 	: name(std::move(scenario_name)) {
 		threads.resize(num_threads_per_process);
@@ -646,25 +1128,34 @@ public:
 	void set_ext_net(test_nccl_net_t* net) { ext_net = net; }
 
 	virtual ncclResult_t setup(ThreadContext& ctx) {
-		// Common setup for two-rank tests
+		// Get rank from thread communicator
 		MPI_Comm_rank(ctx.thread_comm, &ctx.rank);
+		
+		// Calculate peer rank (assuming 2-rank test)
 		ctx.peer_rank = (ctx.rank == 0) ? 1 : 0;
-
+		
+		// Get number of devices
 		OFINCCLCHECK(ext_net->devices(&ctx.ndev));
-
-		// Initialize connection arrays to proper size with nullptr
+		
+		// Initialize device mapping
+		// Rank 1 uses devices in reverse order to avoid contention
+		ctx.device_map.resize(ctx.ndev);
+		for (int dev_idx = 0; dev_idx < ctx.ndev; dev_idx++) {
+			ctx.device_map[dev_idx] = (ctx.rank == 1) ? ctx.ndev - dev_idx - 1 : dev_idx;
+		}
+		
+		// Resize connection vectors
 		ctx.lcomms.resize(ctx.ndev, nullptr);
 		ctx.scomms.resize(ctx.ndev, nullptr);
 		ctx.rcomms.resize(ctx.ndev, nullptr);
 		ctx.shandles.resize(ctx.ndev, nullptr);
 		ctx.rhandles.resize(ctx.ndev, nullptr);
-
+		
 		// Setup connections for all devices
 		for (int dev_idx = 0; dev_idx < ctx.ndev; dev_idx++) {
-			int dev = (ctx.rank == 1) ? ctx.ndev - dev_idx - 1 : dev_idx;
-			OFINCCLCHECK(setup_connection(ctx, dev, ctx.peer_rank));
+			OFINCCLCHECK(ctx.setup_connection(dev_idx, 2));
 		}
-
+		
 		return ncclSuccess;
 	}
 
@@ -673,7 +1164,7 @@ public:
 	virtual ncclResult_t teardown(ThreadContext& ctx) {
 		// Cleanup all connections
 		for (size_t i = 0; i < ctx.lcomms.size(); i++) {
-			OFINCCLCHECK(cleanup_connection(ctx, i));
+			OFINCCLCHECK(ctx.cleanup_connection(i));
 		}
 
 		MPI_Barrier(ctx.thread_comm);
@@ -755,7 +1246,7 @@ public:
 protected:
 	static void* thread_function(void* arg) {
 		ThreadContext* ctx = static_cast<ThreadContext*>(arg);
-		TestScenario* scenario = ctx->scenario;
+		TestScenario* scenario = static_cast<TestScenario*>(ctx->scenario);
 
 		ncclResult_t result = ncclSuccess;
 
