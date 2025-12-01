@@ -26,8 +26,6 @@ public:
 
 		// Base class establishes all connections and populates ctx
 		OFINCCLCHECK(TestScenario::setup(ctx));
-
-		NCCL_OFI_INFO(NCCL_NET, "Thread %zu: rank %d completed connection setup", ctx.thread_id, ctx.rank);
 		
 		return ncclSuccess;
 	}
@@ -37,15 +35,10 @@ public:
 		test_nccl_properties_t props = {};
 		OFINCCLCHECK(ext_net->getProperties(0, &props));
 
-		NCCL_OFI_INFO(NCCL_NET, "Thread %zu: rank %d running with %zu devices", ctx.thread_id, ctx.rank, ctx.lcomms.size());
-
 		for (size_t dev_idx = 0; dev_idx < ctx.lcomms.size(); dev_idx++) {
-			NCCL_OFI_INFO(NCCL_NET, "Rank %d starting test on device index %lu", ctx.rank, dev_idx);
-
 			// Run test over each of the sizes
 			for (size_t size_idx = 0; size_idx < SEND_RECV_SIZES.size(); size_idx++) {
 				const auto& [send_size, recv_size] = SEND_RECV_SIZES[size_idx];
-				NCCL_OFI_INFO(NCCL_NET, "Rank %d testing size %lu->%lu on dev %lu", ctx.rank, send_size, recv_size, dev_idx);
 				
 				// Skip if send size > recv size and regIsGlobal == 0
 				if (props.regIsGlobal == 0 && send_size > recv_size) {
@@ -57,11 +50,7 @@ public:
 
 				// Run test with fresh buffers allocated per call
 				OFINCCLCHECK(ctx.send_receive_test(dev_idx, size_idx, send_size, recv_size));
-				
-				NCCL_OFI_INFO(NCCL_NET, "Rank %d completed size %lu->%lu on dev %lu", ctx.rank, send_size, recv_size, dev_idx);
 			}
-			
-			NCCL_OFI_INFO(NCCL_NET, "Rank %d completed all sizes on device index %lu", ctx.rank, dev_idx);
 		}
 		return ncclSuccess;
 	}

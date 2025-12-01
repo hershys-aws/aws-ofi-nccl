@@ -67,11 +67,6 @@ typedef ncclNet_v9_t test_nccl_net_t;
 typedef ncclNetProperties_v9_t test_nccl_properties_t;
 typedef ncclNetDeviceHandle_v9_t test_nccl_net_device_handle_t;
 
-// Convenience aliases for testing
-using ListenComms = std::vector<nccl_net_ofi_listen_comm_t*>;
-using SendComms = std::vector<nccl_net_ofi_send_comm_t*>;
-using RecvComms = std::vector<nccl_net_ofi_recv_comm_t*>;
-
 static void logger(ncclDebugLogLevel level, unsigned long flags, const char *filefunc,
 		   int line, const char *fmt, ...)
 {
@@ -338,29 +333,6 @@ inline ncclResult_t post_recv(test_nccl_net_t* ext_net,
  * @param size Output pointer to actual size transferred (may be NULL)
  * @return ncclSuccess on success, error code otherwise
  */
-inline ncclResult_t test_request(test_nccl_net_t* ext_net,
-				 void* request,
-				 int* done,
-				 size_t* size)
-{
-	*done = 0;
-	int sizes_int = 0;
-
-	while (!*done) {
-		// Call plugin's test function (expects int* for sizes in v9)
-		OFINCCLCHECK(ext_net->test(request, done, &sizes_int));
-	}
-
-	// Convert int to size_t if size pointer provided
-	if (size != nullptr) {
-		*size = static_cast<size_t>(sizes_int);
-	}
-
-	NCCL_OFI_TRACE(NCCL_NET, "Request completed: request=%p, size=%d",
-		request, sizes_int);
-	return ncclSuccess;
-}
-
 /**
  * Setup connection between two ranks
  *
@@ -746,9 +718,9 @@ struct TestBuffer {
 struct ThreadContext {
 	size_t thread_id;
 	test_nccl_net_t* ext_net;
-	ListenComms lcomms;
-	SendComms scomms;
-	RecvComms rcomms;
+	std::vector<nccl_net_ofi_listen_comm_t*> lcomms;
+	std::vector<nccl_net_ofi_send_comm_t*> scomms;
+	std::vector<nccl_net_ofi_recv_comm_t*> rcomms;
 	ncclResult_t result;
 	void* scenario;  // Pointer to TestScenario, using void* to avoid circular dependency
 	MPI_Comm thread_comm;
@@ -767,22 +739,6 @@ struct ThreadContext {
 	ThreadContext(size_t tid, test_nccl_net_t* net, void* scen, MPI_Comm comm)
 		: thread_id(tid), ext_net(net), result(ncclSuccess), scenario(scen), 
 		  thread_comm(comm), rank(-1), peer_rank(-1), ndev(0) {}
-
-	/**
-	 * Initialize buffer storage after ndev is known
-	 */
-	void initialize_buffer_storage(const std::vector<std::pair<size_t, size_t>>& test_sizes) {
-		test_buffers.resize(ndev);
-		for (int dev = 0; dev < ndev; dev++) {
-			test_buffers[dev].resize(test_sizes.size());
-			for (size_t i = 0; i < test_sizes.size(); i++) {
-				test_buffers[dev][i].send_size = test_sizes[i].first;
-				test_buffers[dev][i].recv_size = test_sizes[i].second;
-				// BufferHandles will be allocated later in allocate_test_buffers()
-			}
-		}
-		NCCL_OFI_INFO(NCCL_NET, "Rank %d: Initialized buffer storage for %d devices, %zu test sizes", rank, ndev, test_sizes.size());
-	}
 
 	/**
 	 * Setup connection for a specific device using context's own fields
@@ -884,43 +840,6 @@ struct ThreadContext {
 			rcomms[idx] = nullptr;
 		}
 
-		return ncclSuccess;
-	}
-
-	/**
-	 * Allocate and register test buffers for all test sizes on a specific device
-	 */
-	ncclResult_t allocate_test_buffers(int dev_idx, int buffer_type)
-	{
-		NCCL_OFI_INFO(NCCL_NET, "Rank %d: Allocating test buffers for dev %d, %zu test sizes, type=%d", 
-		              rank, dev_idx, test_buffers[dev_idx].size(), buffer_type);
-
-		nccl_net_ofi_send_comm_t* sComm = scomms[dev_idx];
-		nccl_net_ofi_recv_comm_t* rComm = rcomms[dev_idx];
-
-		for (auto& tb : test_buffers[dev_idx]) {
-			OFINCCLCHECK(tb.allocate(rank, NUM_REQUESTS, buffer_type, sComm, rComm, ext_net));
-		}
-
-		NCCL_OFI_INFO(NCCL_NET, "Rank %d: Allocated buffers for %zu test sizes on dev %d", rank, test_buffers[dev_idx].size(), dev_idx);
-		return ncclSuccess;
-	}
-
-	/**
-	 * Deallocate and deregister test buffers for all test sizes
-	 * BufferHandle destructors handle cleanup automatically
-	 */
-	ncclResult_t deallocate_test_buffers(int dev_idx)
-	{
-		NCCL_OFI_INFO(NCCL_NET, "Rank %d: Deallocating test buffers for dev %d", rank, dev_idx);
-
-		// Clearing vectors calls BufferHandle destructors which handle deregMr and deallocate_buffer
-		for (auto& tb : test_buffers[dev_idx]) {
-			tb.send_bufs.clear();
-			tb.recv_bufs.clear();
-		}
-
-		NCCL_OFI_INFO(NCCL_NET, "Rank %d: Deallocated test buffers for dev %d", rank, dev_idx);
 		return ncclSuccess;
 	}
 
@@ -1038,80 +957,6 @@ struct ThreadContext {
 		return ncclSuccess;
 	}
 
-	/**
-	 * Flush all receive buffers for a device to ensure data visibility
-	 */
-	ncclResult_t flush_all_buffers(int dev_idx)
-	{
-		if (rank != 1) {
-			return ncclSuccess;  // Only receiver needs to flush
-		}
-
-		NCCL_OFI_INFO(NCCL_NET, "Rank 1: Flushing all buffers for dev %d", dev_idx);
-		nccl_net_ofi_recv_comm_t* rComm = rcomms[dev_idx];
-
-		for (size_t size_idx = 0; size_idx < test_buffers[dev_idx].size(); size_idx++) {
-			TestBuffer& tb = test_buffers[dev_idx][size_idx];
-			
-			if (tb.buffer_type == NCCL_PTR_CUDA) {
-				for (size_t req_idx = 0; req_idx < tb.recv_bufs.size(); req_idx++) {
-					void* iflush_req = nullptr;
-					int sizes_int[1] = {(int)tb.recv_size};
-					OFINCCLCHECK(ext_net->iflush(rComm, 1, (void**)&tb.recv_bufs[req_idx].buffer, sizes_int, &tb.recv_bufs[req_idx].mhandle, &iflush_req));
-					if (iflush_req) {
-						int done = 0;
-						while (!done) {
-							OFINCCLCHECK(ext_net->test(iflush_req, &done, nullptr));
-						}
-					}
-				}
-			}
-		}
-
-		NCCL_OFI_INFO(NCCL_NET, "Rank 1: Flushed all buffers for dev %d", dev_idx);
-		return ncclSuccess;
-	}
-
-	/**
-	 * Validate all test buffers after all tests complete
-	 */
-	ncclResult_t validate_all_tests(int dev_idx)
-	{
-		if (rank != 1) {
-			return ncclSuccess;  // Only receiver validates
-		}
-
-		NCCL_OFI_INFO(NCCL_NET, "Rank 1: Validating all test buffers for dev %d", dev_idx);
-
-		for (size_t size_idx = 0; size_idx < test_buffers[dev_idx].size(); size_idx++) {
-			TestBuffer& tb = test_buffers[dev_idx][size_idx];
-			
-			if (tb.validated) {
-				continue;  // Already validated
-			}
-
-			// Validate data
-			if (!(tb.buffer_type == NCCL_PTR_CUDA && ofi_nccl_gdr_flush_disable())) {
-				// Validate the actual data sent (min of send_size and recv_size)
-				size_t validate_size = std::min(tb.send_size, tb.recv_size);
-				char* expected_buf = nullptr;
-				OFINCCLCHECK(allocate_buff((void**)&expected_buf, validate_size, NCCL_PTR_HOST));
-				OFINCCLCHECK(initialize_buff(expected_buf, validate_size, NCCL_PTR_HOST));
-				for (size_t req_idx = 0; req_idx < tb.recv_bufs.size(); req_idx++) {
-					NCCL_OFI_INFO(NCCL_NET, "Rank 1: Validating buffer %zu for dev %d size_idx %zu (send_size=%zu, recv_size=%zu, validate_size=%zu)", 
-					              req_idx, dev_idx, size_idx, tb.send_size, tb.recv_size, validate_size);
-					OFINCCLCHECK(validate_data(tb.recv_bufs[req_idx].buffer, expected_buf, validate_size, tb.buffer_type));
-				}
-				OFINCCLCHECK(deallocate_buffer(expected_buf, NCCL_PTR_HOST));
-			}
-
-			tb.validated = true;
-			NCCL_OFI_INFO(NCCL_NET, "Rank 1: Validation passed for dev %d size_idx %zu", dev_idx, size_idx);
-		}
-
-		NCCL_OFI_INFO(NCCL_NET, "Rank 1: All validations passed for dev %d", dev_idx);
-		return ncclSuccess;
-	}
 };
 
 /**

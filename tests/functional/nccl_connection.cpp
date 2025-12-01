@@ -39,14 +39,14 @@ public:
 		 * Connections are already established in setup(), so this just validates them.
 		 */
 		for (size_t dev_idx = 0; dev_idx < ctx.lcomms.size(); dev_idx++) {
-			auto dev = (ctx.rank == 1) ? ctx.ndev - dev_idx - 1 : dev_idx;
+			int physical_dev = ctx.device_map[dev_idx];
 
-			NCCL_OFI_TRACE(NCCL_INIT, "Rank %d testing device %zu", ctx.rank, dev);
-			if (gdr_support[dev]) {
-				NCCL_OFI_INFO(NCCL_INIT | NCCL_NET, "Device %zu supports CUDA buffers", dev);
+			NCCL_OFI_TRACE(NCCL_INIT, "Rank %d testing device %d", ctx.rank, physical_dev);
+			if (gdr_support[physical_dev]) {
+				NCCL_OFI_INFO(NCCL_INIT | NCCL_NET, "Device %d supports CUDA buffers", physical_dev);
 			}
 
-			NCCL_OFI_INFO(NCCL_INIT, "Connection validated with rank %d on device %zu", ctx.peer_rank, dev);
+			NCCL_OFI_INFO(NCCL_INIT, "Connection validated with rank %d on device %d", ctx.peer_rank, physical_dev);
 		}
 		return ncclSuccess;
 	}
