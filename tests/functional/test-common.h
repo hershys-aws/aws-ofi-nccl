@@ -608,110 +608,6 @@ inline test_nccl_net_t *get_extNet(void)
 /**
  * RAII wrapper for buffer allocation and registration
  */
-class BufferHandle {
-public:
-	char* buffer = nullptr;
-	void* mhandle = nullptr;
-	size_t size = 0;
-	int type = 0;
-	void* comm = nullptr;
-	test_nccl_net_t* ext_net = nullptr;
-
-	BufferHandle() = default;
-
-	BufferHandle(size_t sz, int tp, void* cm, test_nccl_net_t* net)
-		: size(sz), type(tp), comm(cm), ext_net(net) {
-		if (allocate_buff((void**)&buffer, size, type) != ncclSuccess) {
-			throw std::runtime_error("BufferHandle: Failed to allocate buffer of size " + std::to_string(size));
-		}
-		if (ext_net->regMr(comm, buffer, size, type, &mhandle) != ncclSuccess) {
-			deallocate_buffer(buffer, type);
-			throw std::runtime_error("BufferHandle: Failed to register memory of size " + std::to_string(size));
-		}
-	}
-
-	~BufferHandle() {
-		if (mhandle && comm && ext_net) {
-			ext_net->deregMr(comm, mhandle);
-		}
-		if (buffer) {
-			deallocate_buffer(buffer, type);
-		}
-	}
-
-	// Move semantics
-	BufferHandle(BufferHandle&& other) noexcept
-		: buffer(other.buffer), mhandle(other.mhandle), size(other.size),
-		  type(other.type), comm(other.comm), ext_net(other.ext_net) {
-		other.buffer = nullptr;
-		other.mhandle = nullptr;
-		other.comm = nullptr;
-		other.ext_net = nullptr;
-	}
-
-	BufferHandle& operator=(BufferHandle&& other) noexcept {
-		if (this != &other) {
-			// Clean up existing resources
-			if (mhandle && comm && ext_net) {
-				ext_net->deregMr(comm, mhandle);
-			}
-			if (buffer) {
-				deallocate_buffer(buffer, type);
-			}
-
-			// Move from other
-			buffer = other.buffer;
-			mhandle = other.mhandle;
-			size = other.size;
-			type = other.type;
-			comm = other.comm;
-			ext_net = other.ext_net;
-
-			other.buffer = nullptr;
-			other.mhandle = nullptr;
-			other.comm = nullptr;
-			other.ext_net = nullptr;
-		}
-		return *this;
-	}
-
-	// Delete copy
-	BufferHandle(const BufferHandle&) = delete;
-	BufferHandle& operator=(const BufferHandle&) = delete;
-};
-
-/**
- * Buffer set for a single test size
- */
-struct TestBuffer {
-	size_t send_size;
-	size_t recv_size;
-	int buffer_type;
-	std::vector<BufferHandle> send_bufs;  // [req_idx]
-	std::vector<BufferHandle> recv_bufs;  // [req_idx]
-	bool validated;
-
-	TestBuffer() : send_size(0), recv_size(0), buffer_type(0), validated(false) {}
-
-	/**
-	 * Allocate buffers for this test size
-	 */
-	ncclResult_t allocate(int rank, int num_requests, int buf_type, 
-	                     void* send_comm, void* recv_comm, test_nccl_net_t* net) {
-		buffer_type = buf_type;
-		auto& bufs = (rank == 0) ? send_bufs : recv_bufs;
-		void* comm = (rank == 0) ? send_comm : recv_comm;
-		size_t size = (rank == 0) ? send_size : recv_size;
-
-		bufs.reserve(num_requests);
-		for (int i = 0; i < num_requests; i++) {
-			bufs.emplace_back(size, buf_type, comm, net);
-			// BufferHandle constructor throws on failure
-		}
-		return ncclSuccess;
-	}
-};
-
 /**
  * Thread context structure for test scenarios
  */
@@ -732,9 +628,6 @@ struct ThreadContext {
 
 	// Device mapping: dev_idx → physical_dev
 	std::vector<int> device_map;
-
-	// Per-device, per-test-size buffer management
-	std::vector<std::vector<TestBuffer>> test_buffers;  // [dev_idx][size_idx]
 
 	ThreadContext(size_t tid, test_nccl_net_t* net, void* scen, MPI_Comm comm)
 		: thread_id(tid), ext_net(net), result(ncclSuccess), scenario(scen), 
