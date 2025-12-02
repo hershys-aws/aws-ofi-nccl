@@ -547,19 +547,23 @@ public:
 		test_nccl_net_device_handle_t* rhandle = nullptr;
 
 		// Create listen communicator
-		NCCL_OFI_TRACE(NCCL_INIT, "Rank %d: Creating listen communicator on physical device %d",
-			rank, physical_dev);
+		NCCL_OFI_TRACE(NCCL_INIT, "Rank %d thread %zu: BEFORE listen on physical_dev=%d dev_idx=%d",
+			rank, thread_id, physical_dev, dev_idx);
 		OFINCCLTHROW(ext_net->listen(physical_dev, static_cast<void*>(&local_handle),
 				      reinterpret_cast<void**>(&lcomm)));
+		NCCL_OFI_TRACE(NCCL_INIT, "Rank %d thread %zu: AFTER listen on physical_dev=%d dev_idx=%d",
+			rank, thread_id, physical_dev, dev_idx);
 
 		// Exchange connection handles via MPI
 		MPI_Status status;
-		NCCL_OFI_TRACE(NCCL_INIT, "Rank %d: Exchanging handles with rank %d",
-			rank, peer_rank);
+		NCCL_OFI_TRACE(NCCL_INIT, "Rank %d thread %zu: BEFORE MPI_Sendrecv with rank %d on dev_idx=%d physical_dev=%d",
+			rank, thread_id, peer_rank, dev_idx, physical_dev);
 		MPITHROW(MPI_Sendrecv(
 			local_handle, NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, peer_rank, 0,
 			peer_handle, NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, peer_rank, 0,
 			thread_comm, &status));
+		NCCL_OFI_TRACE(NCCL_INIT, "Rank %d thread %zu: AFTER MPI_Sendrecv with rank %d on dev_idx=%d physical_dev=%d",
+			rank, thread_id, peer_rank, dev_idx, physical_dev);
 		NCCL_OFI_TRACE(NCCL_INIT, "Rank %d: Establishing send and receive communicators",
 			rank);
 

@@ -1021,6 +1021,7 @@ nccl_net_ofi_domain_t::~nccl_net_ofi_domain_t()
 void nccl_net_ofi_ep_t::invalidate()
 {
 	if (this->ep_active == true) {
+		NCCL_OFI_TRACE(NCCL_INIT, "invalidate: ep=%p setting ep_active=false", this);
 		this->ep_active = false;
 
 		pthread_wrapper lock(&this->domain->domain_lock);

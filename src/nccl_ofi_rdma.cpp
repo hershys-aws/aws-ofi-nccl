@@ -3854,6 +3854,7 @@ void nccl_net_ofi_rdma_ep_t::rdma_endpoint_abort()
 	nccl_net_ofi_rdma_domain_t *domain_ptr = this->rdma_endpoint_get_domain();
 	int dev_id = domain_ptr->get_device()->dev_id;
 
+	NCCL_OFI_TRACE(NCCL_INIT, "rdma_endpoint_abort: dev_id=%d ep=%p", dev_id, this);
 	pthread_wrapper eplock(ENDPOINT_LOCK(this));
 
 	this->release_rdma_ep_resources(dev_id);
@@ -4893,7 +4894,9 @@ int nccl_net_ofi_rdma_ep_t::listen(nccl_net_ofi_conn_handle_t *handle,
 
 	int dev_id = device->dev_id;
 
+	NCCL_OFI_TRACE(NCCL_INIT, "listen: dev_id=%d ep=%p BEFORE acquiring ep_lock", dev_id, this);
 	pthread_wrapper lock(&this->ep_lock);
+	NCCL_OFI_TRACE(NCCL_INIT, "listen: dev_id=%d ep=%p ACQUIRED ep_lock", dev_id, this);
 
 	CHECK_ENDPOINT_ACTIVE(this, "listen");
 
