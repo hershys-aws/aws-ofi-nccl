@@ -58,6 +58,28 @@
         }								\
 } while(false);
 
+#define CUDACHECKTHROW(call) do {					\
+        cudaError_t e = call;						\
+        if (e != cudaSuccess) {						\
+	    const char *error_str = cudaGetErrorString(e);		\
+	    throw std::runtime_error(std::string("CUDA error: ") + error_str); \
+        }								\
+} while(false);
+
+#define OFINCCLTHROW(call) do {						\
+	ncclResult_t res = call;					\
+	if (res != ncclSuccess) {					\
+		throw std::runtime_error(std::string("NCCL call failed: ") + #call); \
+	}								\
+} while(false);
+
+#define MPITHROW(call) do {						\
+	int mpi_ret = call;						\
+	if (mpi_ret != MPI_SUCCESS) {					\
+		throw std::runtime_error(std::string("MPI call failed: ") + #call); \
+	}								\
+} while(false);
+
 #define PROC_NAME_IDX(i) ((i) * MPI_MAX_PROCESSOR_NAME)
 
 // Can be changed when porting new versions to the plugin
@@ -266,13 +288,13 @@ static inline ncclResult_t validate_data(char *recv_buf, char *expected_buf, siz
  * @param request Output pointer to request handle
  * @return ncclSuccess on success, error code otherwise
  */
-static inline ncclResult_t post_send(test_nccl_net_t* ext_net,
-				     void* scomm,
-				     void* send_buf,
-				     size_t size,
-				     int tag,
-				     void* mhandle,
-				     void** request)
+static inline void post_send(test_nccl_net_t* ext_net,
+			     void* scomm,
+			     void* send_buf,
+			     size_t size,
+			     int tag,
+			     void* mhandle,
+			     void** request)
 {
 	*request = nullptr;
 
@@ -280,10 +302,9 @@ static inline ncclResult_t post_send(test_nccl_net_t* ext_net,
 		send_buf, size, tag, mhandle);
 	// Retry until we get a valid request
 	while (*request == nullptr) {
-		OFINCCLCHECK(ext_net->isend(scomm, send_buf, size, tag, mhandle, request));
+		OFINCCLTHROW(ext_net->isend(scomm, send_buf, size, tag, mhandle, request));
 	}
 	NCCL_OFI_TRACE(NCCL_NET, "Send posted successfully: request=%p", *request);
-	return ncclSuccess;
 }
 
 /**
@@ -303,22 +324,21 @@ static inline ncclResult_t post_send(test_nccl_net_t* ext_net,
  * @param requests Output array of request handles
  * @return ncclSuccess on success, error code otherwise
  */
-inline ncclResult_t post_recv(test_nccl_net_t* ext_net,
-			      void* rcomm,
-			      int n_recv,
-			      void** recv_bufs,
-			      size_t* sizes,
-			      int* tags,
-			      void** mhandles,
-			      void** requests)
+inline void post_recv(test_nccl_net_t* ext_net,
+		      void* rcomm,
+		      int n_recv,
+		      void** recv_bufs,
+		      size_t* sizes,
+		      int* tags,
+		      void** mhandles,
+		      void** requests)
 {
 	// Retry until we get a valid request
 	NCCL_OFI_TRACE(NCCL_NET, "Posting receive: n_recv=%d", n_recv);
 	while (*requests == nullptr) {
-		OFINCCLCHECK(ext_net->irecv(rcomm, n_recv, recv_bufs, sizes, tags, mhandles, requests));
+		OFINCCLTHROW(ext_net->irecv(rcomm, n_recv, recv_bufs, sizes, tags, mhandles, requests));
 	}
 	NCCL_OFI_TRACE(NCCL_NET, "Receive posted successfully");
-	return ncclSuccess;
 }
 
 /**
@@ -353,148 +373,6 @@ inline ncclResult_t post_recv(test_nccl_net_t* ext_net,
  * @param rHandle Output: receive device handle
  * @return ncclSuccess on success, error code otherwise
  */
-inline ncclResult_t setup_connection(
-	test_nccl_net_t* ext_net,
-	int dev,
-	int rank,
-	int size,
-	int peer_rank,
-	int ndev,
-	MPI_Comm comm,
-	nccl_net_ofi_listen_comm_t** lcomm,
-	nccl_net_ofi_send_comm_t** scomm,
-	nccl_net_ofi_recv_comm_t** rcomm,
-	test_nccl_net_device_handle_t** shandle,
-	test_nccl_net_device_handle_t** rhandle)
-{
-	// Validate device index
-	if (dev < 0 || dev >= ndev) {
-		NCCL_OFI_WARN("Invalid device index %d (ndev=%d)", dev, ndev);
-		return ncclInvalidArgument;
-	}
-
-	// Validate peer rank
-	if (peer_rank < 0 || peer_rank >= size || peer_rank == rank) {
-		NCCL_OFI_WARN("Invalid peer rank %d (rank=%d, size=%d)",
-		peer_rank, rank, size);
-		return ncclInvalidArgument;
-	}
-
-	NCCL_OFI_TRACE(NCCL_INIT, "Rank %d setting up connection with rank %d on device %d",
-		rank, peer_rank, dev);
-
-	// Initialize output pointers
-	*lcomm = nullptr;
-	*scomm = nullptr;
-	*rcomm = nullptr;
-	*shandle = nullptr;
-	*rhandle = nullptr;
-	char local_handle[NCCL_NET_HANDLE_MAXSIZE] = {};
-	char peer_handle[NCCL_NET_HANDLE_MAXSIZE] = {};
-
-
-
-	// Create listen communicator
-	NCCL_OFI_TRACE(NCCL_INIT, "Rank %d: Creating listen communicator on device %d",
-		rank, dev);
-	OFINCCLCHECK(ext_net->listen(dev, static_cast<void*>(&local_handle),
-			      reinterpret_cast<void**>(lcomm)));
-
-	// Exchange connection handles via MPI
-	// Use MPI_Sendrecv to avoid deadlock
-	MPI_Status status;
-	NCCL_OFI_TRACE(NCCL_INIT, "Rank %d: Exchanging handles with rank %d",
-		rank, peer_rank);
-	auto mpi_ret = MPI_Sendrecv(
-		local_handle, NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, peer_rank, 0,
-		peer_handle, NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, peer_rank, 0,
-		comm, &status);
-	if (mpi_ret != MPI_SUCCESS) {
-		NCCL_OFI_WARN("MPI_Sendrecv failed with error %d", mpi_ret);
-		return ncclSystemError;
-	}
-	NCCL_OFI_TRACE(NCCL_INIT, "Rank %d: Establishing send and receive communicators",
-		rank);
-
-	// Establish send and receive communicators
-	// Poll until both are established
-	while (*scomm == nullptr || *rcomm == nullptr) {
-		// Try to connect (create send communicator)
-		if (*scomm == nullptr) {
-			OFINCCLCHECK(ext_net->connect(dev, static_cast<void*>(peer_handle),
-				 reinterpret_cast<void**>(scomm), shandle));
-		}
-
-		// Try to accept (create receive communicator)
-		if (*rcomm == nullptr) {
-			OFINCCLCHECK(ext_net->accept(static_cast<void*>(*lcomm),
-				reinterpret_cast<void**>(rcomm), rhandle));
-		}
-	}
-
-	NCCL_OFI_TRACE(NCCL_INIT, "Rank %d: Successfully established connection with rank %d",
-		rank, peer_rank);
-
-	return ncclSuccess;
-}
-
-/**
- * Cleanup connection communicators
- *
- * Closes listen, send, and receive communicators if they are not NULL.
- *
- * @param ext_net Pointer to external plugin interface
- * @param lcomm Listen communicator to close (may be NULL)
- * @param scomm Send communicator to close (may be NULL)
- * @param rcomm Receive communicator to close (may be NULL)
- */
-inline ncclResult_t cleanup_connection(
-	test_nccl_net_t* ext_net,
-	nccl_net_ofi_listen_comm_t* lcomm,
-	nccl_net_ofi_send_comm_t* scomm,
-	nccl_net_ofi_recv_comm_t* rcomm)
-{
-	// Close listen communicator if not nullptr
-	if (lcomm != nullptr) {
-		OFINCCLCHECK(ext_net->closeListen(static_cast<void*>(lcomm)));
-	}
-
-	// Close send communicator if not nullptr
-	if (scomm != nullptr) {
-		OFINCCLCHECK(ext_net->closeSend(static_cast<void*>(scomm)));
-	}
-
-	// Close receive communicator if not nullptr
-	if (rcomm != nullptr) {
-		OFINCCLCHECK(ext_net->closeRecv(static_cast<void*>(rcomm)));
-	}
-
-	return ncclSuccess;
-}
-
-/**
- * Initialize CUDA for a worker thread
- *
- * Sets the CUDA device for the current thread and initializes the CUDA
- * context. This should be called at the beginning of each worker thread
- * that needs to use CUDA.
- *
- * @param cuda_device CUDA device index to use
- * @return ncclSuccess on success, error code otherwise
- */
-static inline ncclResult_t init_cuda_for_thread(int cuda_device)
-{
-	NCCL_OFI_TRACE(NCCL_NET, "Initializing CUDA for thread with device %d", cuda_device);
-
-	// Set CUDA device for this thread and perform a dummy operation to
-	// initialize CUDA context for this thread
-	CUDACHECK(cudaSetDevice(cuda_device));
-	CUDACHECK(cudaFree(nullptr));
-
-	NCCL_OFI_TRACE(NCCL_NET, "CUDA initialized successfully for thread with device %d", cuda_device);
-	return ncclSuccess;
-}
-
 /**
  * Initialize MPI and get rank information
  *
@@ -629,6 +507,11 @@ struct ThreadContext {
 	// Device mapping: dev_idx → physical_dev
 	std::vector<int> device_map;
 
+private:
+	static constexpr int TAG = 1;
+	static constexpr int NRECV = NCCL_OFI_MAX_RECVS;
+
+public:
 	ThreadContext(size_t tid, test_nccl_net_t* net, void* scen, MPI_Comm comm)
 		: thread_id(tid), ext_net(net), result(ncclSuccess), scenario(scen), 
 		  thread_comm(comm), rank(-1), peer_rank(-1), ndev(0) {}
@@ -636,22 +519,19 @@ struct ThreadContext {
 	/**
 	 * Setup connection for a specific device using context's own fields
 	 */
-	ncclResult_t setup_connection(int dev_idx, int size)
+	void setup_connection(int dev_idx, int size)
 	{
 		// Get physical device from mapping
 		int physical_dev = device_map[dev_idx];
 		
 		// Validate device index
 		if (physical_dev < 0 || physical_dev >= ndev) {
-			NCCL_OFI_WARN("Invalid physical device %d (ndev=%d)", physical_dev, ndev);
-			return ncclInvalidArgument;
+			throw std::runtime_error("Invalid physical device " + std::to_string(physical_dev) + " (ndev=" + std::to_string(ndev) + ")");
 		}
 
 		// Validate peer rank
 		if (peer_rank < 0 || peer_rank >= size || peer_rank == rank) {
-			NCCL_OFI_WARN("Invalid peer rank %d (rank=%d, size=%d)",
-			peer_rank, rank, size);
-			return ncclInvalidArgument;
+			throw std::runtime_error("Invalid peer rank " + std::to_string(peer_rank) + " (rank=" + std::to_string(rank) + ", size=" + std::to_string(size) + ")");
 		}
 
 		NCCL_OFI_TRACE(NCCL_INIT, "Rank %d setting up connection with rank %d on physical_dev=%d (dev_idx=%d)",
@@ -669,33 +549,29 @@ struct ThreadContext {
 		// Create listen communicator
 		NCCL_OFI_TRACE(NCCL_INIT, "Rank %d: Creating listen communicator on physical device %d",
 			rank, physical_dev);
-		OFINCCLCHECK(ext_net->listen(physical_dev, static_cast<void*>(&local_handle),
+		OFINCCLTHROW(ext_net->listen(physical_dev, static_cast<void*>(&local_handle),
 				      reinterpret_cast<void**>(&lcomm)));
 
 		// Exchange connection handles via MPI
 		MPI_Status status;
 		NCCL_OFI_TRACE(NCCL_INIT, "Rank %d: Exchanging handles with rank %d",
 			rank, peer_rank);
-		auto mpi_ret = MPI_Sendrecv(
+		MPITHROW(MPI_Sendrecv(
 			local_handle, NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, peer_rank, 0,
 			peer_handle, NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, peer_rank, 0,
-			thread_comm, &status);
-		if (mpi_ret != MPI_SUCCESS) {
-			NCCL_OFI_WARN("MPI_Sendrecv failed with error %d", mpi_ret);
-			return ncclSystemError;
-		}
+			thread_comm, &status));
 		NCCL_OFI_TRACE(NCCL_INIT, "Rank %d: Establishing send and receive communicators",
 			rank);
 
 		// Establish send and receive communicators
 		while (scomm == nullptr || rcomm == nullptr) {
 			if (scomm == nullptr) {
-				OFINCCLCHECK(ext_net->connect(physical_dev, static_cast<void*>(peer_handle),
+				OFINCCLTHROW(ext_net->connect(physical_dev, static_cast<void*>(peer_handle),
 					 reinterpret_cast<void**>(&scomm), &shandle));
 			}
 
 			if (rcomm == nullptr) {
-				OFINCCLCHECK(ext_net->accept(static_cast<void*>(lcomm),
+				OFINCCLTHROW(ext_net->accept(static_cast<void*>(lcomm),
 					reinterpret_cast<void**>(&rcomm), &rhandle));
 			}
 		}
@@ -709,38 +585,34 @@ struct ThreadContext {
 
 		NCCL_OFI_TRACE(NCCL_INIT, "Rank %d: Successfully established connection with rank %d on physical_dev=%d (stored at dev_idx=%d)",
 			rank, peer_rank, physical_dev, dev_idx);
-
-		return ncclSuccess;
 	}
 
 	/**
 	 * Cleanup connection at specific index using context's own vectors
 	 */
-	ncclResult_t cleanup_connection(size_t idx)
+	void cleanup_connection(size_t idx)
 	{
 		if (idx < lcomms.size() && lcomms[idx] != nullptr) {
-			OFINCCLCHECK(ext_net->closeListen(static_cast<void*>(lcomms[idx])));
+			OFINCCLTHROW(ext_net->closeListen(static_cast<void*>(lcomms[idx])));
 			lcomms[idx] = nullptr;
 		}
 
 		if (idx < scomms.size() && scomms[idx] != nullptr) {
-			OFINCCLCHECK(ext_net->closeSend(static_cast<void*>(scomms[idx])));
+			OFINCCLTHROW(ext_net->closeSend(static_cast<void*>(scomms[idx])));
 			scomms[idx] = nullptr;
 		}
 
 		if (idx < rcomms.size() && rcomms[idx] != nullptr) {
-			OFINCCLCHECK(ext_net->closeRecv(static_cast<void*>(rcomms[idx])));
+			OFINCCLTHROW(ext_net->closeRecv(static_cast<void*>(rcomms[idx])));
 			rcomms[idx] = nullptr;
 		}
-
-		return ncclSuccess;
 	}
 
 	/**
 	 * Poll until all requests complete and validate data
 	 */
-	ncclResult_t poll_and_validate(std::array<void*, NUM_REQUESTS>& requests, char** recv_buf, void** mhandle, 
-	                                 size_t send_size, size_t recv_size, int buffer_type, void* rComm)
+	void poll_and_validate(std::array<void*, NUM_REQUESTS>& requests, char** recv_buf, void** mhandle, 
+	                       size_t send_size, size_t recv_size, int buffer_type, void* rComm)
 	{
 		NCCL_OFI_INFO(NCCL_NET, "Rank %d: Polling for completion", rank);
 		
@@ -751,7 +623,7 @@ struct ThreadContext {
 			for (int req_idx = 0; req_idx < NUM_REQUESTS; req_idx++) {
 				if (requests[req_idx] != nullptr) {
 					int done = 0;
-					OFINCCLCHECK(ext_net->test(requests[req_idx], &done, nullptr));
+					OFINCCLTHROW(ext_net->test(requests[req_idx], &done, nullptr));
 					if (done) {
 						requests[req_idx] = nullptr;
 						
@@ -759,11 +631,11 @@ struct ThreadContext {
 						if (rank == 1 && buffer_type == NCCL_PTR_CUDA) {
 							void* iflush_req = nullptr;
 							int sizes_int[1] = {(int)recv_size};
-							OFINCCLCHECK(ext_net->iflush(rComm, 1, (void**)&recv_buf[req_idx], sizes_int, &mhandle[req_idx], &iflush_req));
+							OFINCCLTHROW(ext_net->iflush(rComm, 1, (void**)&recv_buf[req_idx], sizes_int, &mhandle[req_idx], &iflush_req));
 							if (iflush_req) {
 								int flush_done = 0;
 								while (!flush_done) {
-									OFINCCLCHECK(ext_net->test(iflush_req, &flush_done, nullptr));
+									OFINCCLTHROW(ext_net->test(iflush_req, &flush_done, nullptr));
 								}
 							}
 						}
@@ -779,26 +651,22 @@ struct ThreadContext {
 		if (rank == 1 && !(buffer_type == NCCL_PTR_CUDA && ofi_nccl_gdr_flush_disable())) {
 			size_t validate_size = std::min(send_size, recv_size);
 			char* expected_buf = nullptr;
-			OFINCCLCHECK(allocate_buff((void**)&expected_buf, validate_size, NCCL_PTR_HOST));
-			OFINCCLCHECK(initialize_buff(expected_buf, validate_size, NCCL_PTR_HOST));
+			OFINCCLTHROW(allocate_buff((void**)&expected_buf, validate_size, NCCL_PTR_HOST));
+			OFINCCLTHROW(initialize_buff(expected_buf, validate_size, NCCL_PTR_HOST));
 			for (int req_idx = 0; req_idx < NUM_REQUESTS; req_idx++) {
-				OFINCCLCHECK(validate_data(recv_buf[req_idx], expected_buf, validate_size, buffer_type));
+				OFINCCLTHROW(validate_data(recv_buf[req_idx], expected_buf, validate_size, buffer_type));
 			}
-			OFINCCLCHECK(deallocate_buffer(expected_buf, NCCL_PTR_HOST));
+			OFINCCLTHROW(deallocate_buffer(expected_buf, NCCL_PTR_HOST));
 		}
 		
 		NCCL_OFI_INFO(NCCL_NET, "Rank %d: All requests completed after %d polls", rank, poll_count);
-		return ncclSuccess;
 	}
 
 	/**
 	 * Test send/receive with fresh buffer allocation per call (like master)
 	 */
-	ncclResult_t send_receive_test(int dev_idx, size_t size_idx, size_t send_size, size_t recv_size)
+	void send_receive_test(int dev_idx, size_t size_idx, size_t send_size, size_t recv_size)
 	{
-		static constexpr int TAG = 1;
-		static constexpr int NRECV = NCCL_OFI_MAX_RECVS;
-
 		nccl_net_ofi_send_comm_t* sComm = scomms[dev_idx];
 		nccl_net_ofi_recv_comm_t* rComm = rcomms[dev_idx];
 		
@@ -815,10 +683,10 @@ struct ThreadContext {
 		if (rank == 0) {
 			// Allocate and post sends
 			for (int idx = 0; idx < NUM_REQUESTS; idx++) {
-				OFINCCLCHECK(allocate_buff((void**)&send_buf[idx], send_size, buffer_type));
-				OFINCCLCHECK(initialize_buff(send_buf[idx], send_size, buffer_type));
-				OFINCCLCHECK(ext_net->regMr(sComm, send_buf[idx], send_size, buffer_type, &mhandle[idx]));
-				OFINCCLCHECK(post_send(ext_net, sComm, send_buf[idx], send_size, TAG, mhandle[idx], &requests[idx]));
+				OFINCCLTHROW(allocate_buff((void**)&send_buf[idx], send_size, buffer_type));
+				OFINCCLTHROW(initialize_buff(send_buf[idx], send_size, buffer_type));
+				OFINCCLTHROW(ext_net->regMr(sComm, send_buf[idx], send_size, buffer_type, &mhandle[idx]));
+				post_send(ext_net, sComm, send_buf[idx], send_size, TAG, mhandle[idx], &requests[idx]);
 			}
 		} else {
 			// Allocate and post receives
@@ -828,14 +696,14 @@ struct ThreadContext {
 			std::fill(tags.begin(), tags.end(), TAG);
 
 			for (int idx = 0; idx < NUM_REQUESTS; idx++) {
-				OFINCCLCHECK(allocate_buff((void**)&recv_buf[idx], recv_size, buffer_type));
-				OFINCCLCHECK(ext_net->regMr(rComm, recv_buf[idx], recv_size, buffer_type, &mhandle[idx]));
-				OFINCCLCHECK(post_recv(ext_net, rComm, NRECV, (void**)&recv_buf[idx], sizes.data(), tags.data(), &mhandle[idx], &requests[idx]));
+				OFINCCLTHROW(allocate_buff((void**)&recv_buf[idx], recv_size, buffer_type));
+				OFINCCLTHROW(ext_net->regMr(rComm, recv_buf[idx], recv_size, buffer_type, &mhandle[idx]));
+				post_recv(ext_net, rComm, NRECV, (void**)&recv_buf[idx], sizes.data(), tags.data(), &mhandle[idx], &requests[idx]);
 			}
 		}
 
 		// Poll for completion with validation
-		OFINCCLCHECK(poll_and_validate(requests, recv_buf, mhandle, send_size, recv_size, buffer_type, rComm));
+		poll_and_validate(requests, recv_buf, mhandle, send_size, recv_size, buffer_type, rComm);
 
 		// Cleanup
 		for (int idx = 0; idx < NUM_REQUESTS; idx++) {
@@ -846,8 +714,6 @@ struct ThreadContext {
 			if (send_buf[idx]) deallocate_buffer(send_buf[idx], buffer_type);
 			if (recv_buf[idx]) deallocate_buffer(recv_buf[idx], buffer_type);
 		}
-
-		return ncclSuccess;
 	}
 
 };
@@ -867,7 +733,7 @@ public:
 
 	void set_ext_net(test_nccl_net_t* net) { ext_net = net; }
 
-	virtual ncclResult_t setup(ThreadContext& ctx) {
+	virtual void setup(ThreadContext& ctx) {
 		// Get rank from thread communicator
 		MPI_Comm_rank(ctx.thread_comm, &ctx.rank);
 		
@@ -875,7 +741,7 @@ public:
 		ctx.peer_rank = (ctx.rank == 0) ? 1 : 0;
 		
 		// Get number of devices
-		OFINCCLCHECK(ext_net->devices(&ctx.ndev));
+		OFINCCLTHROW(ext_net->devices(&ctx.ndev));
 		
 		// Initialize device mapping
 		// Rank 1 uses devices in reverse order to avoid contention
@@ -893,20 +759,17 @@ public:
 		
 		// Setup connections for all devices
 		for (int dev_idx = 0; dev_idx < ctx.ndev; dev_idx++) {
-			OFINCCLCHECK(ctx.setup_connection(dev_idx, 2));
+			ctx.setup_connection(dev_idx, 2);
 		}
-		
-		return ncclSuccess;
 	}
 
-	virtual ncclResult_t run(ThreadContext& ctx) = 0;
+	virtual void run(ThreadContext& ctx) = 0;
 
-	virtual ncclResult_t teardown(ThreadContext& ctx) {
+	virtual void teardown(ThreadContext& ctx) {
 		// Cleanup all connections
 		for (size_t i = 0; i < ctx.lcomms.size(); i++) {
-			OFINCCLCHECK(ctx.cleanup_connection(i));
+			ctx.cleanup_connection(i);
 		}
-		return ncclSuccess;
 	}
 
 	ncclResult_t execute() {
@@ -919,13 +782,22 @@ public:
 		if (threads.size() == 0) {
 			thread_contexts.emplace_back(0, ext_net, this, MPI_COMM_WORLD);
 
-			for (size_t iter = 0; iter < iterations; iter++) {
-				OFINCCLCHECK(setup(thread_contexts[0]));
-				OFINCCLCHECK(run(thread_contexts[0]));
-				OFINCCLCHECK(teardown(thread_contexts[0]));
-				MPI_Barrier(MPI_COMM_WORLD);
+			try {
+				// Initialize CUDA context for main thread
+				CUDACHECKTHROW(cudaSetDevice(0));
+				CUDACHECKTHROW(cudaFree(nullptr));
+				
+				for (size_t iter = 0; iter < iterations; iter++) {
+					setup(thread_contexts[0]);
+					run(thread_contexts[0]);
+					teardown(thread_contexts[0]);
+					MPI_Barrier(MPI_COMM_WORLD);
+				}
+				return ncclSuccess;
+			} catch (const std::exception& e) {
+				NCCL_OFI_WARN("Test failed: %s", e.what());
+				return ncclSystemError;
 			}
-			return thread_contexts[0].result;
 		}
 
 		// Execute on pthreads
@@ -981,47 +853,36 @@ protected:
 		ThreadContext* ctx = static_cast<ThreadContext*>(arg);
 		TestScenario* scenario = static_cast<TestScenario*>(ctx->scenario);
 
-		ncclResult_t result = ncclSuccess;
-
-		// Execute iterations
-		for (size_t iter = 0; iter < scenario->iterations; iter++) {
-			// Execute the sequence - continue to teardown even if setup/run fails
-			if ((result = scenario->setup(*ctx)) != ncclSuccess) {
-				NCCL_OFI_WARN("Thread %zu setup failed on iteration %zu", ctx->thread_id, iter);
-				ctx->result = result;
+		try {
+			// Initialize CUDA context for this thread
+			CUDACHECKTHROW(cudaSetDevice(0));
+			CUDACHECKTHROW(cudaFree(nullptr));
+			
+			// Execute iterations
+			for (size_t iter = 0; iter < scenario->iterations; iter++) {
+				scenario->setup(*ctx);
+				scenario->run(*ctx);
+				scenario->teardown(*ctx);
+				MPI_Barrier(ctx->thread_comm);
 			}
-
-			if (result == ncclSuccess && (result = scenario->run(*ctx)) != ncclSuccess) {
-				NCCL_OFI_WARN("Thread %zu run failed on iteration %zu", ctx->thread_id, iter);
-				ctx->result = result;
+			
+			// Free thread communicator after all iterations complete
+			if (ctx->thread_comm != MPI_COMM_WORLD) {
+				MPI_Comm_free(&ctx->thread_comm);
 			}
-
-			// Always call teardown to ensure cleanup happens
-			ncclResult_t teardown_result = scenario->teardown(*ctx);
-			if (teardown_result != ncclSuccess) {
-				NCCL_OFI_WARN("Thread %zu teardown failed on iteration %zu", ctx->thread_id, iter);
-				if (result == ncclSuccess) {
-					ctx->result = teardown_result;
-				}
+			
+			ctx->result = ncclSuccess;
+		} catch (const std::exception& e) {
+			NCCL_OFI_WARN("Thread %zu failed: %s", ctx->thread_id, e.what());
+			ctx->result = ncclSystemError;
+			
+			// Attempt cleanup on error
+			try {
+				scenario->teardown(*ctx);
+			} catch (const std::exception& teardown_error) {
+				NCCL_OFI_WARN("Thread %zu teardown also failed: %s", 
+				             ctx->thread_id, teardown_error.what());
 			}
-
-			// Barrier between iterations
-			MPI_Barrier(ctx->thread_comm);
-
-			// If any step failed, break out of iteration loop
-			if (result != ncclSuccess) {
-				break;
-			}
-		}
-
-		// Free thread communicator after all iterations complete
-		if (ctx->thread_comm != MPI_COMM_WORLD) {
-			MPI_Comm_free(&ctx->thread_comm);
-		}
-
-		// Set final result if not already set
-		if (ctx->result == ncclSuccess) {
-			ctx->result = result;
 		}
 
 		return nullptr;

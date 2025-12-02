@@ -13,18 +13,7 @@ class ConnectionTest : public TestScenario {
 public:
 	explicit ConnectionTest(size_t num_threads = 0) : TestScenario("NCCL Connection Test", num_threads) {}
 
-	ncclResult_t setup(ThreadContext& ctx) override {
-		// Initialize CUDA context BEFORE establishing connections
-		OFINCCLCHECK(init_cuda_for_thread(0));
-
-		// Base class establishes all connections and populates ctx
-		OFINCCLCHECK(TestScenario::setup(ctx));
-
-		NCCL_OFI_INFO(NCCL_NET, "Thread %zu: rank %d completed connection setup", ctx.thread_id, ctx.rank);
-		return ncclSuccess;
-	}
-
-	ncclResult_t run(ThreadContext& ctx) override {
+	void run(ThreadContext& ctx) override {
 		// Get device properties + GDR support
 		auto gdr_support = get_support_gdr(ext_net);
 
@@ -48,7 +37,6 @@ public:
 
 			NCCL_OFI_INFO(NCCL_INIT, "Connection validated with rank %d on device %d", ctx.peer_rank, physical_dev);
 		}
-		return ncclSuccess;
 	}
 };
 

@@ -18,15 +18,14 @@ public:
 		peer_handles.resize(num_contexts);
 	}
 
-	ncclResult_t setup(ThreadContext& ctx) override {
-		OFINCCLCHECK(init_cuda_for_thread(0));
+	void setup(ThreadContext& ctx) override {
 		
 		// First iteration: create listen comms and exchange handles
 		if (ctx.lcomms.empty()) {
 			// Initialize ctx fields (rank, peer_rank, ndev, device_map)
 			MPI_Comm_rank(ctx.thread_comm, &ctx.rank);
 			ctx.peer_rank = (ctx.rank == 0) ? 1 : 0;
-			OFINCCLCHECK(ext_net->devices(&ctx.ndev));
+			OFINCCLTHROW(ext_net->devices(&ctx.ndev));
 			
 			ctx.device_map.resize(ctx.ndev);
 			for (int dev_idx = 0; dev_idx < ctx.ndev; dev_idx++) {
@@ -47,14 +46,14 @@ public:
 				char local_handle[NCCL_NET_HANDLE_MAXSIZE] = {};
 				
 				// Create listen comm
-				OFINCCLCHECK(ext_net->listen(physical_dev, &local_handle,
+				OFINCCLTHROW(ext_net->listen(physical_dev, &local_handle,
 											reinterpret_cast<void**>(&ctx.lcomms[dev_idx])));
 				
 				// Exchange and store peer handles
 				MPI_Status status;
-				MPI_Sendrecv(local_handle, NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, ctx.peer_rank, 0,
+				MPITHROW(MPI_Sendrecv(local_handle, NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, ctx.peer_rank, 0,
 							peer_handles[ctx.thread_id][dev_idx].data(), NCCL_NET_HANDLE_MAXSIZE, MPI_CHAR, 
-							ctx.peer_rank, 0, ctx.thread_comm, &status);
+							ctx.peer_rank, 0, ctx.thread_comm, &status));
 			}
 		}
 		
@@ -70,38 +69,36 @@ public:
 			// Poll until both send and recv comms are created
 			while (ctx.scomms[dev_idx] == nullptr || ctx.rcomms[dev_idx] == nullptr) {
 				if (ctx.scomms[dev_idx] == nullptr) {
-					OFINCCLCHECK(ext_net->connect(physical_dev, peer_handle_copy,
+					OFINCCLTHROW(ext_net->connect(physical_dev, peer_handle_copy,
 												 reinterpret_cast<void**>(&ctx.scomms[dev_idx]), 
 												 &ctx.shandles[dev_idx]));
 				}
 				if (ctx.rcomms[dev_idx] == nullptr) {
-					OFINCCLCHECK(ext_net->accept(ctx.lcomms[dev_idx],
+					OFINCCLTHROW(ext_net->accept(ctx.lcomms[dev_idx],
 												reinterpret_cast<void**>(&ctx.rcomms[dev_idx]),
 												&ctx.rhandles[dev_idx]));
 				}
 			}
 		}
 		
-		return ncclSuccess;
 	}
 
-	ncclResult_t run(ThreadContext& ctx) override {
+	void run(ThreadContext& ctx) override {
 		for (size_t dev_idx = 0; dev_idx < ctx.lcomms.size(); dev_idx++) {
-			OFINCCLCHECK(ctx.send_receive_test(dev_idx, 0, DATA_SIZE, DATA_SIZE));
+			ctx.send_receive_test(dev_idx, 0, DATA_SIZE, DATA_SIZE);
 		}
-		return ncclSuccess;
 	}
 
-	ncclResult_t teardown(ThreadContext& ctx) override {
+	void teardown(ThreadContext& ctx) override {
 		// Close send/recv comms
 		for (size_t i = 0; i < ctx.scomms.size(); i++) {
 			if (ctx.scomms[i]) {
-				OFINCCLCHECK(ext_net->closeSend(ctx.scomms[i]));
+				OFINCCLTHROW(ext_net->closeSend(ctx.scomms[i]));
 				ctx.scomms[i] = nullptr;
 				ctx.shandles[i] = nullptr;
 			}
 			if (ctx.rcomms[i]) {
-				OFINCCLCHECK(ext_net->closeRecv(ctx.rcomms[i]));
+				OFINCCLTHROW(ext_net->closeRecv(ctx.rcomms[i]));
 				ctx.rcomms[i] = nullptr;
 				ctx.rhandles[i] = nullptr;
 			}
@@ -112,13 +109,12 @@ public:
 		if (thread_iteration_counts[ctx.thread_id] == iterations) {
 			for (size_t i = 0; i < ctx.lcomms.size(); i++) {
 				if (ctx.lcomms[i]) {
-					OFINCCLCHECK(ext_net->closeListen(ctx.lcomms[i]));
+					OFINCCLTHROW(ext_net->closeListen(ctx.lcomms[i]));
 					ctx.lcomms[i] = nullptr;
 				}
 			}
 		}
 		
-		return ncclSuccess;
 	}
 
 private:

@@ -14,8 +14,7 @@ public:
 	explicit InflightCloseTest(size_t num_threads = 0, size_t num_iterations = 1) 
 		: TestScenario("Inflight Close Test", num_threads, num_iterations) {}
 
-	ncclResult_t setup(ThreadContext& ctx) override {
-		OFINCCLCHECK(init_cuda_for_thread(0));
+	void setup(ThreadContext& ctx) override {
 		
 		// First iteration: setup all connections via base class
 		if (ctx.lcomms.empty()) {
@@ -26,14 +25,13 @@ public:
 		// (inflight_close sets them to nullptr after closing)
 		for (size_t dev_idx = 0; dev_idx < ctx.lcomms.size(); dev_idx++) {
 			if (ctx.lcomms[dev_idx] == nullptr) {
-				OFINCCLCHECK(ctx.setup_connection(dev_idx, 2));
+				ctx.setup_connection(dev_idx, 2);
 			}
 		}
 		
-		return ncclSuccess;
 	}
 
-	ncclResult_t run(ThreadContext& ctx) override {
+	void run(ThreadContext& ctx) override {
 		auto gdr_support = get_support_gdr(ext_net);
 
 		for (size_t dev_idx = 0; dev_idx < ctx.lcomms.size(); dev_idx++) {
@@ -43,12 +41,11 @@ public:
 			NCCL_OFI_TRACE(NCCL_INIT, "Thread %zu: Rank %d testing device %d",
 			               ctx.thread_id, ctx.rank, physical_dev);
 
-			OFINCCLCHECK(run_iteration(ctx, dev_idx, buffer_type));
+			run_iteration(ctx, dev_idx, buffer_type);
 		}
-		return ncclSuccess;
 	}
 
-	ncclResult_t teardown(ThreadContext& ctx) override {
+	void teardown(ThreadContext& ctx) override {
 		return TestScenario::teardown(ctx);
 	}
 
@@ -56,7 +53,7 @@ private:
 	static constexpr size_t DATA_SIZE = 1024 * 1024;
 	static constexpr int TAG = 1;
 
-	ncclResult_t run_iteration(ThreadContext& ctx, size_t dev_idx, int buffer_type) {
+	void run_iteration(ThreadContext& ctx, size_t dev_idx, int buffer_type) {
 		void* buffers[NUM_REQUESTS] = {nullptr};
 		void* mhandles[NUM_REQUESTS] = {nullptr};
 		void* requests[NUM_REQUESTS] = {nullptr};
@@ -68,49 +65,48 @@ private:
 		// Post operations
 		if (ctx.rank == 0) {
 			for (int i = 0; i < NUM_REQUESTS; i++) {
-				OFINCCLCHECK(allocate_buff(&buffers[i], DATA_SIZE, buffer_type));
-				OFINCCLCHECK(initialize_buff(buffers[i], DATA_SIZE, buffer_type));
-				OFINCCLCHECK(ext_net->regMr(sComm, buffers[i], DATA_SIZE, buffer_type, &mhandles[i]));
-				OFINCCLCHECK(post_send(ext_net, sComm, buffers[i], DATA_SIZE, TAG, mhandles[i], &requests[i]));
+				OFINCCLTHROW(allocate_buff(&buffers[i], DATA_SIZE, buffer_type));
+				OFINCCLTHROW(initialize_buff(buffers[i], DATA_SIZE, buffer_type));
+				OFINCCLTHROW(ext_net->regMr(sComm, buffers[i], DATA_SIZE, buffer_type, &mhandles[i]));
+				post_send(ext_net, sComm, buffers[i], DATA_SIZE, TAG, mhandles[i], &requests[i]);
 			}
 		} else {
 			for (int i = 0; i < NUM_REQUESTS; i++) {
-				OFINCCLCHECK(allocate_buff(&buffers[i], DATA_SIZE, buffer_type));
-				OFINCCLCHECK(ext_net->regMr(rComm, buffers[i], DATA_SIZE, buffer_type, &mhandles[i]));
+				OFINCCLTHROW(allocate_buff(&buffers[i], DATA_SIZE, buffer_type));
+				OFINCCLTHROW(ext_net->regMr(rComm, buffers[i], DATA_SIZE, buffer_type, &mhandles[i]));
 
 				void* recv_bufs[] = {buffers[i]};
 				size_t sizes[] = {DATA_SIZE};
 				int tags[] = {TAG};
 				void* handles[] = {mhandles[i]};
-				OFINCCLCHECK(post_recv(ext_net, rComm, 1, recv_bufs, sizes, tags, handles, &requests[i]));
+				post_recv(ext_net, rComm, 1, recv_bufs, sizes, tags, handles, &requests[i]);
 			}
 		}
 
 		// Deregister memory with inflight requests (this is the actual test)
 		for (int i = 0; i < NUM_REQUESTS; i++) {
 			if (ctx.rank == 0) {
-				OFINCCLCHECK(ext_net->deregMr(sComm, mhandles[i]));
+				OFINCCLTHROW(ext_net->deregMr(sComm, mhandles[i]));
 			} else {
-				OFINCCLCHECK(ext_net->deregMr(rComm, mhandles[i]));
+				OFINCCLTHROW(ext_net->deregMr(rComm, mhandles[i]));
 			}
 		}
 
 		// Close communicators after deregister
-		OFINCCLCHECK(ext_net->closeSend(sComm));
+		OFINCCLTHROW(ext_net->closeSend(sComm));
 		ctx.scomms[dev_idx] = nullptr;
-		OFINCCLCHECK(ext_net->closeRecv(rComm));
+		OFINCCLTHROW(ext_net->closeRecv(rComm));
 		ctx.rcomms[dev_idx] = nullptr;
-		OFINCCLCHECK(ext_net->closeListen(lComm));
+		OFINCCLTHROW(ext_net->closeListen(lComm));
 		ctx.lcomms[dev_idx] = nullptr;
 
 		// Cleanup buffers
 		for (int i = 0; i < NUM_REQUESTS; i++) {
 			if (buffers[i]) {
-				OFINCCLCHECK(deallocate_buffer(buffers[i], buffer_type));
+				OFINCCLTHROW(deallocate_buffer(buffers[i], buffer_type));
 			}
 		}
 
-		return ncclSuccess;
 	}
 };
 

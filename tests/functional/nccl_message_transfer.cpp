@@ -8,9 +8,7 @@
  */
 
 #include "config.h"
-#include <array>
 #include "test-common.h"
-#include <mutex>
 
 class MessageTransferTest : public TestScenario {
 
@@ -20,20 +18,10 @@ public:
 		// Test all sizes
 	}
 
-	ncclResult_t setup(ThreadContext& ctx) override {
-		// Initialize CUDA context BEFORE establishing connections
-		OFINCCLCHECK(init_cuda_for_thread(0));
-
-		// Base class establishes all connections and populates ctx
-		OFINCCLCHECK(TestScenario::setup(ctx));
-		
-		return ncclSuccess;
-	}
-
-	ncclResult_t run(ThreadContext& ctx) override {
+	void run(ThreadContext& ctx) override {
 		// Get device properties
 		test_nccl_properties_t props = {};
-		OFINCCLCHECK(ext_net->getProperties(0, &props));
+		OFINCCLTHROW(ext_net->getProperties(0, &props));
 
 		for (size_t dev_idx = 0; dev_idx < ctx.lcomms.size(); dev_idx++) {
 			// Run test over each of the sizes
@@ -49,15 +37,9 @@ public:
 				}
 
 				// Run test with fresh buffers allocated per call
-				OFINCCLCHECK(ctx.send_receive_test(dev_idx, size_idx, send_size, recv_size));
+				ctx.send_receive_test(dev_idx, size_idx, send_size, recv_size);
 			}
 		}
-		return ncclSuccess;
-	}
-
-	ncclResult_t teardown(ThreadContext& ctx) override {
-		// Base class cleans up connections
-		return TestScenario::teardown(ctx);
 	}
 
 private:
