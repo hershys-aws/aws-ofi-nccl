@@ -48,6 +48,23 @@ static_assert(sizeof(struct nccl_net_ofi_gin_signal_metadata_msg_t) == 32,
 	      "nccl_net_ofi_gin_signal_metadata_msg_t must be exactly 32 bytes for inline send");
 
 /**
+ * ACK message sent inline via fi_send from receiver to sender.
+ *
+ * The receiver distinguishes ACK messages from metadata messages by
+ * checking the received length against sizeof(gin_ack_msg_t).
+ */
+struct gin_ack_msg_t {
+	/* comm_id on the sender side (so the sender can look up the comm) */
+	uint32_t comm_id;
+	/* Last (highest) sequence number in the acknowledged range */
+	uint16_t ack_seq_num;
+	/* Number of seq_nums in the acknowledged range */
+	uint16_t count;
+};
+
+static_assert(sizeof(gin_ack_msg_t) == 8, "gin_ack_msg_t must be exactly 8 bytes");
+
+/**
  * Constants
  */
 #define MAX_NUM_RAILS (4)
@@ -93,38 +110,38 @@ static_assert(sizeof(struct nccl_net_ofi_gin_signal_metadata_msg_t) == 32,
  */
 
 /* Bit 0: message type. 0 = non-ACK, 1 = ACK */
-#define GIN_IMM_IS_ACK(data)   ((data) & 1)
+#define GIN_IMM_IS_ACK(data) ((data) & 1)
 
 /* Common fields (same position in both formats) */
-#define GIN_IMM_TYPE_BITS      1
-#define GIN_IMM_COMM_BITS      10
-#define GIN_IMM_SEQ_BITS       11
-#define GIN_IMM_COMM_SHIFT     GIN_IMM_TYPE_BITS
-#define GIN_IMM_SEQ_SHIFT      (GIN_IMM_COMM_SHIFT + GIN_IMM_COMM_BITS)
-#define GIN_IMM_SEQ_MASK       ((1 << GIN_IMM_SEQ_BITS) - 1)
-#define GIN_IMM_COMM_MASK      ((1 << GIN_IMM_COMM_BITS) - 1)
-#define GIN_MAX_COMMS          (1 << GIN_IMM_COMM_BITS)
+#define GIN_IMM_TYPE_BITS 1
+#define GIN_IMM_COMM_BITS 10
+#define GIN_IMM_SEQ_BITS 11
+#define GIN_IMM_COMM_SHIFT GIN_IMM_TYPE_BITS
+#define GIN_IMM_SEQ_SHIFT (GIN_IMM_COMM_SHIFT + GIN_IMM_COMM_BITS)
+#define GIN_IMM_SEQ_MASK ((1 << GIN_IMM_SEQ_BITS) - 1)
+#define GIN_IMM_COMM_MASK ((1 << GIN_IMM_COMM_BITS) - 1)
+#define GIN_MAX_COMMS (1 << GIN_IMM_COMM_BITS)
 
-#define GIN_IMM_GET_COMM_ID(data)  (((data) >> GIN_IMM_COMM_SHIFT) & GIN_IMM_COMM_MASK)
-#define GIN_IMM_GET_SEQ_NUM(data)  (((data) >> GIN_IMM_SEQ_SHIFT) & GIN_IMM_SEQ_MASK)
+#define GIN_IMM_GET_COMM_ID(data) (((data) >> GIN_IMM_COMM_SHIFT) & GIN_IMM_COMM_MASK)
+#define GIN_IMM_GET_SEQ_NUM(data) (((data) >> GIN_IMM_SEQ_SHIFT) & GIN_IMM_SEQ_MASK)
 
 /* Non-ACK fields above the common fields */
-#define GIN_IMM_SEG_CNT_BITS   4
-#define GIN_IMM_ACK_REQ_BITS   1
-#define GIN_IMM_SEG_CNT_SHIFT  (GIN_IMM_SEQ_SHIFT + GIN_IMM_SEQ_BITS)
-#define GIN_IMM_ACK_REQ_SHIFT  (GIN_IMM_SEG_CNT_SHIFT + GIN_IMM_SEG_CNT_BITS)
-#define GIN_IMM_SEG_CNT_MASK   ((1 << GIN_IMM_SEG_CNT_BITS) - 1)
+#define GIN_IMM_SEG_CNT_BITS 4
+#define GIN_IMM_ACK_REQ_BITS 1
+#define GIN_IMM_SEG_CNT_SHIFT (GIN_IMM_SEQ_SHIFT + GIN_IMM_SEQ_BITS)
+#define GIN_IMM_ACK_REQ_SHIFT (GIN_IMM_SEG_CNT_SHIFT + GIN_IMM_SEG_CNT_BITS)
+#define GIN_IMM_SEG_CNT_MASK ((1 << GIN_IMM_SEG_CNT_BITS) - 1)
 
-#define GIN_IMM_GET_SEG_CNT(data)       (((data) >> GIN_IMM_SEG_CNT_SHIFT) & GIN_IMM_SEG_CNT_MASK)
+#define GIN_IMM_GET_SEG_CNT(data) (((data) >> GIN_IMM_SEG_CNT_SHIFT) & GIN_IMM_SEG_CNT_MASK)
 #define GIN_IMM_GET_ACK_REQUESTED(data) (((data) >> GIN_IMM_ACK_REQ_SHIFT) & 1)
-#define GIN_IMM_SEG_DATA(comm_id, seq, nseg, ack_req)                                               \
-	(((ack_req) << GIN_IMM_ACK_REQ_SHIFT) | ((nseg) << GIN_IMM_SEG_CNT_SHIFT) |               \
+#define GIN_IMM_SEG_DATA(comm_id, seq, nseg, ack_req)                                              \
+	(((ack_req) << GIN_IMM_ACK_REQ_SHIFT) | ((nseg) << GIN_IMM_SEG_CNT_SHIFT) |                \
 	 ((seq) << GIN_IMM_SEQ_SHIFT) | ((comm_id) << GIN_IMM_COMM_SHIFT))
 
 /* ACK fields above the common fields */
-#define GIN_IMM_ACK_COUNT_BITS  10
+#define GIN_IMM_ACK_COUNT_BITS 10
 #define GIN_IMM_ACK_COUNT_SHIFT (GIN_IMM_SEQ_SHIFT + GIN_IMM_SEQ_BITS)
-#define GIN_IMM_ACK_COUNT_MASK  ((1 << GIN_IMM_ACK_COUNT_BITS) - 1)
+#define GIN_IMM_ACK_COUNT_MASK ((1 << GIN_IMM_ACK_COUNT_BITS) - 1)
 
 #define GIN_IMM_ACK_GET_COUNT(data) (((data) >> GIN_IMM_ACK_COUNT_SHIFT) & GIN_IMM_ACK_COUNT_MASK)
 #define GIN_IMM_ACK_DATA(comm_id, seq, count)                                                      \
