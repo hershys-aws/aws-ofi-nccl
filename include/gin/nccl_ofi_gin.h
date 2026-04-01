@@ -26,19 +26,19 @@ inline nccl_ofi_device_copy &get_device_copy()
  * The listen communicator which implements GIN API's nccl_ofi_gin_listen() and
  * nccl_ofi_gin_connect() functionality
  */
-class nccl_ofi_gin_listen_comm {
+class nccl_ofi_rdma_gin_listen_comm : public nccl_ofi_gin_listen_comm_t {
 private:
 	nccl_net_ofi_ep_t *ep;
 	nccl_net_ofi_listen_comm *l_comm;
 
 public:
-	nccl_ofi_gin_listen_comm(int dev_arg, nccl_net_ofi_ep_t *ep_arg,
+	nccl_ofi_rdma_gin_listen_comm(int dev_arg, nccl_net_ofi_ep_t *ep_arg,
 				 nccl_net_ofi_listen_comm *l_comm_arg)
 	    : ep(ep_arg), l_comm(l_comm_arg)
 	{
 	}
 
-	~nccl_ofi_gin_listen_comm()
+	~nccl_ofi_rdma_gin_listen_comm()
 	{
 		int ret = l_comm->close();
 		if (ret != 0) {
@@ -47,7 +47,7 @@ public:
 	}
 
 	int connect(nccl_net_ofi_conn_handle_t *handles[], int nranks, int rank,
-		    nccl_ofi_gin_comm **gin_comm_out);
+		    nccl_ofi_rdma_gin_put_comm **gin_comm_out);
 };
 
 /**
@@ -126,7 +126,7 @@ struct gin_remote_mr {
  * A symmetric memory registration handle. This is the result of GIN API's
  * regMrSym() family of functions.
  */
-struct gin_sym_mr_handle {
+struct nccl_ofi_rdma_gin_symm_mr_handle : public nccl_ofi_gin_symm_mr_handle_t {
 	/* Address provided by NCCL to regMrSym. This is the base for the offset
 	   provided by NCCL */
 	void *input_address;
@@ -146,12 +146,12 @@ struct gin_sym_mr_handle {
 /**
  * This represents the main GIN communicator
  */
-class nccl_ofi_gin_comm {
+class nccl_ofi_rdma_gin_put_comm : public nccl_ofi_gin_put_comm_t {
 public:
-	nccl_ofi_gin_comm(nccl_ofi_gin_resources &resources_arg, int rank_, int nranks_,
+	nccl_ofi_rdma_gin_put_comm(nccl_ofi_gin_resources &resources_arg, int rank_, int nranks_,
 			  nccl_net_ofi_send_comm *s_comm_, nccl_net_ofi_recv_comm *r_comm_);
 
-	~nccl_ofi_gin_comm();
+	~nccl_ofi_rdma_gin_put_comm();
 
 	nccl_ofi_gin_resources &get_resources()
 	{
@@ -182,9 +182,9 @@ public:
 	 * @return: 0 on success, non-zero on failure
 	 */
 	int regMrSymDmaBuf(nccl_ofi_mr_ckey_ref ckey, void *data_ptr, size_t size, int type,
-			   uint64_t mrFlags, gin_sym_mr_handle **mr_handle_out);
+			   uint64_t mrFlags, nccl_ofi_rdma_gin_symm_mr_handle **mr_handle_out);
 
-	int deregMrSym(gin_sym_mr_handle *mr_handle);
+	int deregMrSym(nccl_ofi_rdma_gin_symm_mr_handle *mr_handle);
 
 	void increment_outstanding_ack_counter()
 	{
@@ -230,10 +230,10 @@ public:
 	 *
 	 * @return: 0 on success, non-zero on failure
 	 */
-	int iputSignal(uint64_t srcOff, gin_sym_mr_handle *srcMhandle, size_t size, uint64_t dstOff,
-		       gin_sym_mr_handle *dstMhandle, uint32_t rank, uint64_t signalOff,
-		       gin_sym_mr_handle *signalMhandle, uint64_t signalValue, uint32_t signalOp,
-		       nccl_net_ofi_gin_iputsignal_req_t **request);
+	int iputSignal(uint64_t srcOff, nccl_ofi_rdma_gin_symm_mr_handle *srcMhandle, size_t size, uint64_t dstOff,
+		       nccl_ofi_rdma_gin_symm_mr_handle *dstMhandle, uint32_t rank, uint64_t signalOff,
+		       nccl_ofi_rdma_gin_symm_mr_handle *signalMhandle, uint64_t signalValue, uint32_t signalOp,
+		       nccl_ofi_rdma_gin_iputsignal_req **request);
 
 	/**
 	 * Callback for metadata completion.
@@ -304,7 +304,7 @@ private:
 
 	   TODO: we could also just pass this in the handle to avoid a map
 	   lookup. Not sure yet if that is the right thing to do. */
-	std::unordered_map<void *, gin_sym_mr_handle *> mr_handle_map;
+	std::unordered_map<void *, nccl_ofi_rdma_gin_symm_mr_handle *> mr_handle_map;
 
 	/* Number of outstanding RDMA writes for signal delivery acknowledgement
 	   Used to wait for remaining acknowledgements on communicator close. */
@@ -318,7 +318,7 @@ private:
 	 * @param ack_seq_num last (highest) sequence number in the acknowledged range
 	 * @param count number of seq_nums in the acknowledged range
 	 */
-	int send_ack(nccl_ofi_gin_comm &gin_comm, uint32_t peer_rank,
+	int send_ack(nccl_ofi_rdma_gin_put_comm &gin_comm, uint32_t peer_rank,
 		     uint32_t ack_seq_num, uint32_t count);
 
 	/**
@@ -335,7 +335,7 @@ private:
 
 	int iput_signal_deliver_all(uint32_t peer_rank);
 
-	friend class nccl_ofi_gin_listen_comm;
+	friend class nccl_ofi_rdma_gin_listen_comm;
 
 public:
 	/* NVTX tracing support - public for macro access (parallel to RDMA struct pattern) */

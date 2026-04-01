@@ -194,7 +194,7 @@ nccl_net_ofi_gin_sendack_req_t::~nccl_net_ofi_gin_sendack_req_t()
 	ack_fl->entry_free(ack_elem);
 }
 
-int nccl_net_ofi_gin_iputsignal_req_t::test(int *done)
+int nccl_ofi_rdma_gin_iputsignal_req::test(int *done)
 {
 	*done = 0;
 
@@ -205,7 +205,7 @@ int nccl_net_ofi_gin_iputsignal_req_t::test(int *done)
 	for (auto &write_req : write_reqs) {
 		if (write_req) {
 			bool write_done = false;
-			int ret = write_req->test(write_done);
+			int ret = write_req->is_done(write_done);
 			if (ret != 0)
 				return ret;
 			if (write_done) {
@@ -220,7 +220,7 @@ int nccl_net_ofi_gin_iputsignal_req_t::test(int *done)
 
 	if (send_req) {
 		bool send_done = false;
-		int ret = send_req->test(send_done);
+		int ret = send_req->is_done(send_done);
 		if (ret != 0)
 			return ret;
 		if (send_done) {

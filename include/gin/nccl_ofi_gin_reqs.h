@@ -157,7 +157,7 @@ public:
 	int handle_cq_entry(struct fi_cq_entry * /*cq_entry_base*/, fi_addr_t /*src_addr*/,
 			    uint16_t /*rail_id*/) override;
 
-	nccl_net_ofi_gin_sendack_req_t(nccl_ofi_gin_comm &gin_comm_arg, fid_ep *ep_arg,
+	nccl_net_ofi_gin_sendack_req_t(nccl_ofi_rdma_gin_put_comm &gin_comm_arg, fid_ep *ep_arg,
 					int rail_id_arg,
 					nccl_ofi_freelist::fl_entry *ack_elem_arg,
 					fi_addr_t remote_addr_arg,
@@ -173,7 +173,7 @@ public:
 	virtual ~nccl_net_ofi_gin_sendack_req_t() override;
 
 private:
-	nccl_ofi_gin_comm &gin_comm;
+	nccl_ofi_rdma_gin_put_comm &gin_comm;
 	struct fid_ep *ep;
 	int rail_id;
 	nccl_ofi_freelist::fl_entry *ack_elem;
@@ -187,10 +187,10 @@ class nccl_net_ofi_gin_metadata_send_req_t;
 /**
  * Represents an in-progress iputSignal operation on the initiator side
  */
-class nccl_net_ofi_gin_iputsignal_req_t : public nccl_net_ofi_gin_base_req {
+class nccl_ofi_rdma_gin_iputsignal_req : public nccl_ofi_gin_req_t, public nccl_net_ofi_gin_base_req {
 public:
-	nccl_net_ofi_gin_iputsignal_req_t(
-		nccl_ofi_gin_comm &gin_comm_arg, uint32_t peer_rank_arg, uint16_t msg_seq_num_arg,
+	nccl_ofi_rdma_gin_iputsignal_req(
+		nccl_ofi_rdma_gin_put_comm &gin_comm_arg, uint32_t peer_rank_arg, uint16_t msg_seq_num_arg,
 		std::array<nccl_net_ofi_gin_write_req_t *, MAX_NUM_RAILS> write_reqs_arg,
 		nccl_net_ofi_gin_metadata_send_req_t *send_req_arg,
 		bool is_ack_requested_arg)
@@ -214,7 +214,7 @@ public:
 
 private:
 	/* Associated Comm object */
-	nccl_ofi_gin_comm &gin_comm;
+	nccl_ofi_rdma_gin_put_comm &gin_comm;
 
 	uint32_t peer_rank;
 	/* Message sequence number */
@@ -230,7 +230,7 @@ private:
  * Freed when the signal is delivered.
  *
  * All members are private, because this class is only used by
- * nccl_ofi_gin_comm. That class is added as a friend.
+ * nccl_ofi_rdma_gin_put_comm. That class is added as a friend.
  */
 class nccl_net_ofi_gin_iputsignal_recv_req : public nccl_net_ofi_gin_base_req {
 	/* NVTX tracing support - public for macro access */
@@ -270,7 +270,7 @@ private:
 	/* This request structure doesn't have any use outside of gin_comm.
 	   So, instead of adding a bunch of getters/setters, just add a
 	   friend class. */
-	friend class nccl_ofi_gin_comm;
+	friend class nccl_ofi_rdma_gin_put_comm;
 };
 
 /**
@@ -305,7 +305,7 @@ public:
 		return 0;
 	}
 
-	int test(bool &done_arg)
+	int is_done(bool &done_arg)
 	{
 		done_arg = this->done;
 		return 0;
@@ -361,7 +361,7 @@ public:
 		return 0;
 	}
 
-	int test(bool &done_arg)
+	int is_done(bool &done_arg)
 	{
 		done_arg = this->done;
 		return 0;
@@ -390,7 +390,7 @@ private:
 	nccl_net_ofi_gin_base_req base_req;
 	nccl_net_ofi_gin_recv_req_t recv_req;
 	nccl_net_ofi_gin_sendack_req_t sendack_req;
-	nccl_net_ofi_gin_iputsignal_req_t iputsignal_req;
+	nccl_ofi_rdma_gin_iputsignal_req iputsignal_req;
 	nccl_net_ofi_gin_iputsignal_recv_req iputsignal_recv_req;
 	nccl_net_ofi_gin_write_req_t write_req;
 	nccl_net_ofi_gin_metadata_send_req_t metadata_send_req;
