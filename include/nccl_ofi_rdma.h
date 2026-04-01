@@ -10,6 +10,7 @@
 
 #include <array>
 #include <deque>
+#include <memory>
 
 #include "nccl_ofi.h"
 #include "cm/nccl_ofi_cm.h"
@@ -758,6 +759,9 @@ public:
 	ofi_domain_ptr domain;
 };
 
+#if HAVE_CUDA
+class nccl_ofi_rdma_gin_ep_t;
+#endif
 
 class nccl_net_ofi_rdma_domain_t : public nccl_net_ofi_domain_t {
 public:
@@ -787,6 +791,10 @@ public:
 	{
 		return num_rails;
 	}
+
+#if HAVE_CUDA
+	nccl_ofi_gin_ep_t *get_gin_ep() override;
+#endif
 
 	inline nccl_net_ofi_rdma_device_t *rdma_domain_get_device()
 	{
@@ -890,6 +898,11 @@ public:
 
 	uint16_t num_rails;
 	std::vector<nccl_net_ofi_rdma_domain_rail_t> domain_rails;
+
+#if HAVE_CUDA
+	/* Cached GIN endpoint, lazily created by get_gin_ep() */
+	std::unique_ptr<nccl_ofi_rdma_gin_ep_t> cached_gin_ep;
+#endif
 
 	/* The flush buffer */
 	nccl_net_ofi_rdma_flush_buffer_t flush_buff;

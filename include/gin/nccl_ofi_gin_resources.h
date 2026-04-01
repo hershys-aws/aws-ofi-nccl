@@ -12,6 +12,7 @@
 #include <vector>
 #include <unordered_map>
 
+#include "nccl_ofi_gin_base.h"
 #include "gin/nccl_ofi_gin_reqs.h"
 #include "gin/nccl_ofi_gin_types.h"
 #include "nccl_ofi_freelist.h"
@@ -46,18 +47,19 @@ struct nccl_ofi_gin_ep_rail_t {
 /**
  * The GIN endpoint type
  */
-class nccl_ofi_gin_ep_t {
+class nccl_ofi_rdma_gin_ep_t : public nccl_ofi_gin_ep_t {
 public:
 	/**
 	 * Create a GIN EP using the provided domain object
 	 *
 	 * @param domain_arg: Domain object from net transport
 	 */
-	nccl_ofi_gin_ep_t(nccl_net_ofi_domain_t &domain_arg);
+	nccl_ofi_rdma_gin_ep_t(nccl_net_ofi_domain_t &domain_arg);
 
-	nccl_ofi_gin_ep_t(const nccl_ofi_gin_ep_t &) = delete;
+	nccl_ofi_rdma_gin_ep_t(const nccl_ofi_rdma_gin_ep_t &) = delete;
+	nccl_ofi_rdma_gin_ep_t &operator=(const nccl_ofi_rdma_gin_ep_t &) = delete;
 
-	~nccl_ofi_gin_ep_t();
+	~nccl_ofi_rdma_gin_ep_t() override;
 
 	uint16_t get_num_rails() const
 	{
@@ -237,7 +239,7 @@ public:
 		}
 	}
 
-	nccl_ofi_gin_ep_t &get_ep()
+	nccl_ofi_rdma_gin_ep_t &get_ep()
 	{
 		return gin_ep;
 	}
@@ -342,7 +344,7 @@ private:
 
 	nccl_ofi_idpool_t comm_id_pool;
 
-	nccl_ofi_gin_ep_t gin_ep;
+	nccl_ofi_rdma_gin_ep_t gin_ep;
 
 	/**
 	 * Queue of pending Libfabric requests to be retried

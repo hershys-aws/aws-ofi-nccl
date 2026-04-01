@@ -26,6 +26,10 @@
 #include "nccl_ofi_ep_addr_list.h"
 #include "nccl_ofi_param.h"
 #include "nccl_ofi_rdma.h"
+#include "nccl_ofi_gin_base.h"
+#if HAVE_CUDA
+#include "gin/nccl_ofi_gin_resources.h"
+#endif
 #include "nccl_ofi_math.h"
 #include "nccl_ofi_tracepoint.h"
 #include "nccl_ofi_scheduler.h"
@@ -6450,6 +6454,18 @@ nccl_net_ofi_rdma_ep_t::nccl_net_ofi_rdma_ep_t(nccl_net_ofi_rdma_domain_t *domai
 }
 
 
+#if HAVE_CUDA
+/* Caller must hold the device lock */
+nccl_ofi_gin_ep_t *nccl_net_ofi_rdma_domain_t::get_gin_ep()
+{
+	if (!cached_gin_ep) {
+		cached_gin_ep = std::make_unique<nccl_ofi_rdma_gin_ep_t>(*this);
+	}
+	return cached_gin_ep.get();
+}
+#endif
+
+
 int nccl_net_ofi_rdma_domain_t::cleanup_resources()
 {
 	int ret = 0;
@@ -6458,6 +6474,10 @@ int nccl_net_ofi_rdma_domain_t::cleanup_resources()
 	/* cleanup_resources should only be called once per domain instance */
 	assert(!this->called_cleanup_resources);
 	this->called_cleanup_resources = true;
+
+#if HAVE_CUDA
+	cached_gin_ep.reset();
+#endif
 
 	err_code = this->dealloc_and_dereg_flush_buff();
 	if (err_code != 0) {

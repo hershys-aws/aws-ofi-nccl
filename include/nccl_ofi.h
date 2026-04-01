@@ -116,6 +116,8 @@ class nccl_net_ofi_domain_t;
 class nccl_net_ofi_ep_t;
 class nccl_net_ofi_plugin_t;
 
+class nccl_ofi_gin_ep_t;
+
 class nccl_net_ofi_comm;
 class nccl_net_ofi_listen_comm;
 class nccl_net_ofi_send_comm;
@@ -465,6 +467,14 @@ public:
 	 * @brief       Returns number of rails.
 	 */
 	virtual uint16_t get_ofi_num_rails() = 0;
+
+	/**
+	 * @brief	Returns the GIN endpoint for this domain, or nullptr
+	 *		if the transport does not support GIN.
+	 *
+	 * Caller must hold the device lock.
+	 */
+	virtual nccl_ofi_gin_ep_t *get_gin_ep() { return nullptr; }
 
 	/* Create a new endpoint
 	 *
