@@ -24,10 +24,14 @@ struct gin_connect_handle {
 	nccl_ofi_addr ep_names[MAX_NUM_RAILS];
 };
 
-nccl_ofi_rdma_gin_put_comm::nccl_ofi_rdma_gin_put_comm(nccl_ofi_gin_resources &resources_arg, int rank_, int nranks_,
-				     nccl_net_ofi_send_comm *s_comm_,
-				     nccl_net_ofi_recv_comm *r_comm_)
-    : resources(resources_arg), resource_releaser { resources }, rank(rank_), nranks(nranks_),
+nccl_ofi_rdma_gin_put_comm::nccl_ofi_rdma_gin_put_comm(
+	nccl_ofi_gin_resources &resources_arg,
+	int rank_, int nranks_,
+	nccl_net_ofi_send_comm *s_comm_,
+	nccl_net_ofi_recv_comm *r_comm_)
+    : resources(resources_arg),
+      resource_releaser { resources },
+      rank(rank_), nranks(nranks_),
       dev(s_comm_->dev_id), ag_comm(s_comm_, r_comm_, rank_, nranks_),
       metadata_fl(nullptr, &freelist_deleter)
 {
@@ -107,7 +111,7 @@ static inline int rail_addr_insert(nccl_ofi_gin_ep_rail_t &rail, const nccl_ofi_
 }
 
 int nccl_ofi_rdma_gin_listen_comm::connect(nccl_net_ofi_conn_handle_t *handles[], int nranks, int rank,
-				      nccl_ofi_rdma_gin_put_comm **gin_comm_out)
+				      nccl_ofi_gin_put_comm_t **put_comm_out)
 {
 	int ret = 0;
 
@@ -144,7 +148,7 @@ int nccl_ofi_rdma_gin_listen_comm::connect(nccl_net_ofi_conn_handle_t *handles[]
 		}
 	}
 
-	/* Create a GIN resources object on the endpoint if it does not exist */
+	/* Get or create GIN resources on the transport endpoint */
 	auto *resources = ep->get_gin_resources();
 	if (resources == nullptr) {
 		resources = new nccl_ofi_gin_resources(*ep);
@@ -200,7 +204,7 @@ int nccl_ofi_rdma_gin_listen_comm::connect(nccl_net_ofi_conn_handle_t *handles[]
 		}
 	}
 
-	(*gin_comm_out) = gin_comm;
+	(*put_comm_out) = gin_comm;
 	return 0;
 }
 
@@ -258,7 +262,7 @@ int nccl_ofi_rdma_gin_put_comm::send_ack(nccl_ofi_rdma_gin_put_comm &gin_comm, u
 }
 
 int nccl_ofi_rdma_gin_put_comm::regMrSymDmaBuf(nccl_ofi_mr_ckey_ref ckey, void *data_ptr, size_t size,
-				      int type, uint64_t mrFlags, nccl_ofi_rdma_gin_symm_mr_handle **mr_handle_out)
+				      int type, uint64_t mrFlags, nccl_ofi_gin_symm_mr_handle_t **mr_handle_out)
 {
 	auto &gin_ep = resources.get_ep();
 
@@ -343,8 +347,9 @@ int nccl_ofi_rdma_gin_put_comm::regMrSymDmaBuf(nccl_ofi_mr_ckey_ref ckey, void *
 	return 0;
 }
 
-int nccl_ofi_rdma_gin_put_comm::deregMrSym(nccl_ofi_rdma_gin_symm_mr_handle *mr_handle)
+int nccl_ofi_rdma_gin_put_comm::deregMrSym(nccl_ofi_gin_symm_mr_handle_t *mr_handle_base)
 {
+	auto *mr_handle = static_cast<nccl_ofi_rdma_gin_symm_mr_handle *>(mr_handle_base);
 	NCCL_OFI_TRACE(NCCL_NET, "deregMrSym handle %p", mr_handle);
 	if (mr_handle->type == NCCL_PTR_CUDA) {
 		int ret = get_device_copy().deregister_region(mr_handle->gdr_handle);
@@ -383,12 +388,16 @@ int nccl_ofi_rdma_gin_put_comm::await_pending_requests()
 	return ret;
 }
 
-int nccl_ofi_rdma_gin_put_comm::iputSignal(uint64_t srcOff, nccl_ofi_rdma_gin_symm_mr_handle *srcMhandle, size_t size,
-				  uint64_t dstOff, nccl_ofi_rdma_gin_symm_mr_handle *dstMhandle, uint32_t dst_rank,
-				  uint64_t signalOff, nccl_ofi_rdma_gin_symm_mr_handle *signalMhandle,
+int nccl_ofi_rdma_gin_put_comm::iputSignal(uint64_t srcOff, nccl_ofi_gin_symm_mr_handle_t *srcMhandle_base, size_t size,
+				  uint64_t dstOff, nccl_ofi_gin_symm_mr_handle_t *dstMhandle_base, uint32_t dst_rank,
+				  uint64_t signalOff, nccl_ofi_gin_symm_mr_handle_t *signalMhandle_base,
 				  uint64_t signalValue, uint32_t signalOp,
-				  nccl_ofi_rdma_gin_iputsignal_req **request)
+				  nccl_ofi_gin_req_t **request)
 {
+	auto *srcMhandle = static_cast<nccl_ofi_rdma_gin_symm_mr_handle *>(srcMhandle_base);
+	auto *dstMhandle = static_cast<nccl_ofi_rdma_gin_symm_mr_handle *>(dstMhandle_base);
+	auto *signalMhandle = static_cast<nccl_ofi_rdma_gin_symm_mr_handle *>(signalMhandle_base);
+
 	if (signalOp != 0 && signalOp != NCCL_NET_SIGNAL_OP_INC &&
 	    signalOp != NCCL_NET_SIGNAL_OP_ADD) {
 		NCCL_OFI_WARN("Only support signal add/increment");

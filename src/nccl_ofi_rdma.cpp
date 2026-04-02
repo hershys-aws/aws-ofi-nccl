@@ -6475,10 +6475,6 @@ int nccl_net_ofi_rdma_domain_t::cleanup_resources()
 	assert(!this->called_cleanup_resources);
 	this->called_cleanup_resources = true;
 
-#if HAVE_CUDA
-	cached_gin_ep.reset();
-#endif
-
 	err_code = this->dealloc_and_dereg_flush_buff();
 	if (err_code != 0) {
 		NCCL_OFI_WARN("Failed to deregister flush buffer pool");

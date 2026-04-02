@@ -61,6 +61,10 @@ public:
 
 	~nccl_ofi_rdma_gin_ep_t() override;
 
+	int listen(int dev, uint64_t comm_id,
+		   nccl_net_ofi_conn_handle_t *handle,
+		   nccl_ofi_gin_listen_comm_t **listen_comm) override;
+
 	uint16_t get_num_rails() const
 	{
 		return num_rails;
@@ -113,6 +117,9 @@ private:
 	std::vector<nccl_ofi_gin_ep_rail_t> rails;
 
 	nccl_net_ofi_scheduler *scheduler;
+
+	/* Cached from param at construction; avoids mutex in CQ loop */
+	size_t cq_process_max_iter;
 	/**
 	 * Handler for list of CQ entries
 	 */

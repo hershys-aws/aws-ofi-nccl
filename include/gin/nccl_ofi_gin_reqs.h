@@ -5,6 +5,7 @@
 #ifndef NCCL_OFI_GIN_REQS_H
 #define NCCL_OFI_GIN_REQS_H
 
+#include "gin/nccl_ofi_gin_types.h"
 #include "nccl_ofi.h"
 #include "nccl_ofi_freelist.h"
 #include "nccl_ofi_tracepoint.h"
@@ -52,7 +53,7 @@ public:
 /**
  * GIN base request type.
  */
-class nccl_net_ofi_gin_base_req {
+class nccl_net_ofi_gin_base_req : public nccl_ofi_gin_req_t {
 public:
 	void set_fl_entry(nccl_ofi_freelist::fl_entry *entry)
 	{
@@ -187,7 +188,7 @@ class nccl_net_ofi_gin_metadata_send_req_t;
 /**
  * Represents an in-progress iputSignal operation on the initiator side
  */
-class nccl_ofi_rdma_gin_iputsignal_req : public nccl_ofi_gin_req_t, public nccl_net_ofi_gin_base_req {
+class nccl_ofi_rdma_gin_iputsignal_req : public nccl_net_ofi_gin_base_req {
 public:
 	nccl_ofi_rdma_gin_iputsignal_req(
 		nccl_ofi_rdma_gin_put_comm &gin_comm_arg, uint32_t peer_rank_arg, uint16_t msg_seq_num_arg,
@@ -199,7 +200,7 @@ public:
 	{
 	}
 
-	int test(int *done);
+	int test(int *done) override;
 
 	/* Subrequests - public to match RDMA struct pattern */
 	/* Write requests */

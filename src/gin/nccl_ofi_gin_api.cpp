@@ -137,26 +137,23 @@ static ncclResult_t nccl_ofi_gin_listen(void *ctx, int dev, void *handle, void *
 	}
 
 	try {
-		/* Note: although the GIN plugin uses its own endpoint type, we still need
-		the transport endpoint to set up the bootstrap AG ring.
+		nccl_net_ofi_domain_t *domain = device->get_domain();
+		nccl_ofi_gin_ep_t *gin_ep = domain->get_gin_ep();
+		if (gin_ep == nullptr) {
+			NCCL_OFI_WARN("GIN not supported on this transport");
+			return ncclInternalError;
+		}
 
-		Use comm_id as endpoint_key to ensure all GIN contexts within the same
-		communicator share the same endpoint. This creates one endpoint per
-		communicator instead of one per thread.
-		
-		domain_key=0 uses the default domain, endpoint_key=comm_id caches endpoints
-		by communicator ID instead of thread ID. */
-
-		nccl_net_ofi_ep_t *ep = device->get_ep(0, static_cast<long>(comm_id));
-
-		nccl_net_ofi_listen_comm *l_comm = nullptr;
-		int ret = ep->listen(static_cast<nccl_net_ofi_conn_handle_t *>(handle), &l_comm);
+		nccl_ofi_gin_listen_comm_t *l_comm = nullptr;
+		int ret = gin_ep->listen(dev, comm_id,
+					 static_cast<nccl_net_ofi_conn_handle_t *>(handle),
+					 &l_comm);
 		if (ret != 0) {
 			NCCL_OFI_WARN("GIN: error listening on device %i.", dev);
 			return nccl_net_ofi_retval_translate(ret);
 		}
 
-		*listenComm = new nccl_ofi_rdma_gin_listen_comm(dev, ep, l_comm);
+		*listenComm = l_comm;
 	} catch (const std::exception &e) {
 		NCCL_OFI_WARN("Caught exception in GIN listen: %s", e.what());
 		return ncclSystemError;
@@ -169,13 +166,13 @@ static ncclResult_t nccl_ofi_gin_connect(void *ctx, void *handles[], int nranks,
 					 void *listenComm, void **collComm)
 {
 	auto *gin_handles = reinterpret_cast<nccl_net_ofi_conn_handle_t **>(handles);
-	auto *gin_l_comm = static_cast<nccl_ofi_rdma_gin_listen_comm *>(listenComm);
+	auto *gin_l_comm = static_cast<nccl_ofi_gin_listen_comm_t *>(listenComm);
 
 	int ret = 0;
 
 	try {
 		ret = gin_l_comm->connect(gin_handles, nranks, rank,
-					  reinterpret_cast<nccl_ofi_rdma_gin_put_comm **>(collComm));
+					  reinterpret_cast<nccl_ofi_gin_put_comm_t **>(collComm));
 	} catch (const std::exception &e) {
 		NCCL_OFI_WARN("Caught exception in GIN connect: %s", e.what());
 		ret = -EINVAL;
@@ -188,8 +185,8 @@ static ncclResult_t nccl_ofi_gin_regMrSymDmaBuf(void *collComm, void *data, size
 						uint64_t offset, int fd, uint64_t mrFlags,
 						void **mhandle, void **ginHandle)
 {
-	auto *comm = static_cast<nccl_ofi_rdma_gin_put_comm *>(collComm);
-	nccl_ofi_rdma_gin_symm_mr_handle *mr_handle = nullptr;
+	auto *comm = static_cast<nccl_ofi_gin_put_comm_t *>(collComm);
+	nccl_ofi_gin_symm_mr_handle_t *mr_handle = nullptr;
 
 #if HAVE_DECL_FI_MR_DMABUF
 	const nccl_ofi_mr_ckey_t cache_key =
@@ -222,8 +219,8 @@ static ncclResult_t nccl_ofi_gin_regMrSym(void *collComm, void *data, size_t siz
 
 static ncclResult_t nccl_ofi_gin_deregMrSym(void *collComm, void *mhandle)
 {
-	auto *comm = static_cast<nccl_ofi_rdma_gin_put_comm *>(collComm);
-	auto *mr_handle = static_cast<nccl_ofi_rdma_gin_symm_mr_handle *>(mhandle);
+	auto *comm = static_cast<nccl_ofi_gin_put_comm_t *>(collComm);
+	auto *mr_handle = static_cast<nccl_ofi_gin_symm_mr_handle_t *>(mhandle);
 
 	int ret = comm->deregMrSym(mr_handle);
 	if (ret != 0) {
@@ -235,15 +232,15 @@ static ncclResult_t nccl_ofi_gin_deregMrSym(void *collComm, void *mhandle)
 
 static ncclResult_t nccl_ofi_gin_ginProgress(void *collComm)
 {
-	auto *gin_comm = static_cast<nccl_ofi_rdma_gin_put_comm *>(collComm);
-	int ret = gin_comm->get_resources().progress();
+	auto *gin_comm = static_cast<nccl_ofi_gin_put_comm_t *>(collComm);
+	int ret = gin_comm->progress();
 
 	return nccl_net_ofi_retval_translate(ret);
 }
 
 static ncclResult_t nccl_ofi_gin_closeColl(void *collComm)
 {
-	auto *gin_comm = static_cast<nccl_ofi_rdma_gin_put_comm *>(collComm);
+	auto *gin_comm = static_cast<nccl_ofi_gin_put_comm_t *>(collComm);
 
 	int ret = gin_comm->await_pending_requests();
 
@@ -254,13 +251,13 @@ static ncclResult_t nccl_ofi_gin_closeColl(void *collComm)
 
 static ncclResult_t nccl_ofi_gin_closeListen(void *listenComm)
 {
-	delete static_cast<nccl_ofi_rdma_gin_listen_comm *>(listenComm);
+	delete static_cast<nccl_ofi_gin_listen_comm_t *>(listenComm);
 	return ncclSuccess;
 }
 
 static ncclResult_t nccl_ofi_gin_test(void *collComm, void *request, int *done)
 {
-	auto *req = static_cast<nccl_ofi_rdma_gin_iputsignal_req *>(request);
+	auto *req = static_cast<nccl_ofi_gin_req_t *>(request);
 	int ret = req->test(done);
 	return nccl_net_ofi_retval_translate(ret);
 }
@@ -270,12 +267,12 @@ static ncclResult_t nccl_ofi_gin_iputSignal(void *collComm, uint64_t srcOff, voi
 					    uint32_t rank, uint64_t signalOff, void *signalMhandle,
 					    uint64_t signalValue, uint32_t signalOp, void **request)
 {
-	auto *gin_comm = static_cast<nccl_ofi_rdma_gin_put_comm *>(collComm);
-	auto *src_mr_handle = static_cast<nccl_ofi_rdma_gin_symm_mr_handle *>(srcMhandle);
-	auto *dst_mr_handle = static_cast<nccl_ofi_rdma_gin_symm_mr_handle *>(dstMhandle);
-	auto *signal_mr_handle = static_cast<nccl_ofi_rdma_gin_symm_mr_handle *>(signalMhandle);
+	auto *gin_comm = static_cast<nccl_ofi_gin_put_comm_t *>(collComm);
+	auto *src_mr_handle = static_cast<nccl_ofi_gin_symm_mr_handle_t *>(srcMhandle);
+	auto *dst_mr_handle = static_cast<nccl_ofi_gin_symm_mr_handle_t *>(dstMhandle);
+	auto *signal_mr_handle = static_cast<nccl_ofi_gin_symm_mr_handle_t *>(signalMhandle);
 
-	nccl_ofi_rdma_gin_iputsignal_req *req = nullptr;
+	nccl_ofi_gin_req_t *req = nullptr;
 	int ret = gin_comm->iputSignal(srcOff, src_mr_handle, size, dstOff, dst_mr_handle, rank,
 				       signalOff, signal_mr_handle, signalValue, signalOp, &req);
 	if (ret != 0) {

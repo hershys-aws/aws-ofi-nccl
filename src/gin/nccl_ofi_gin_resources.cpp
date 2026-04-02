@@ -5,6 +5,7 @@
 #include "config.h"
 
 #include "gin/nccl_ofi_gin_resources.h"
+#include "gin/nccl_ofi_gin.h"
 #include "gin/nccl_ofi_gin_reqs.h"
 
 #include "nccl_ofi_assert.h"
@@ -25,6 +26,24 @@ nccl_ofi_rdma_gin_ep_t::nccl_ofi_rdma_gin_ep_t(nccl_net_ofi_domain_t &domain_arg
 		rails.emplace_back(r, domain);
 	}
 	this->scheduler = new nccl_net_ofi_threshold_scheduler(this->num_rails);
+	this->cq_process_max_iter = ofi_nccl_gin_cq_process_max_iter();
+}
+
+int nccl_ofi_rdma_gin_ep_t::listen(int dev, uint64_t comm_id,
+				   nccl_net_ofi_conn_handle_t *handle,
+				   nccl_ofi_gin_listen_comm_t **listen_comm)
+{
+	nccl_net_ofi_ep_t *ep = domain.get_device()->get_ep(0, static_cast<long>(comm_id));
+
+	nccl_net_ofi_listen_comm *l_comm = nullptr;
+	int ret = ep->listen(handle, &l_comm);
+	if (ret != 0) {
+		NCCL_OFI_WARN("GIN: error listening on device %i.", dev);
+		return ret;
+	}
+
+	*listen_comm = new nccl_ofi_rdma_gin_listen_comm(dev, ep, l_comm);
+	return 0;
 }
 
 nccl_ofi_rdma_gin_ep_t::~nccl_ofi_rdma_gin_ep_t()
@@ -137,7 +156,7 @@ int nccl_ofi_rdma_gin_ep_t::gin_process_cq_rail(uint16_t rail_id)
 			ret = -EINVAL;
 			goto exit;
 		}
-	} while (iter < gin_cq_process_max_iter);
+	} while (iter < cq_process_max_iter);
 
 exit:
 	return ret;
