@@ -2,12 +2,12 @@
  * Copyright (c) 2026      Amazon.com, Inc. or its affiliates. All rights reserved.
  */
 
-#ifndef NCCL_OFI_GIN_H
-#define NCCL_OFI_GIN_H
+#ifndef NCCL_OFI_RDMA_GIN_H_
+#define NCCL_OFI_RDMA_GIN_H_
 
-#include "gin/nccl_ofi_gin_allgather.h"
-#include "gin/nccl_ofi_gin_resources.h"
-#include "gin/nccl_ofi_gin_types.h"
+#include "rdma_gin/nccl_ofi_rdma_gin_allgather.h"
+#include "rdma_gin/nccl_ofi_rdma_gin_resources.h"
+#include "rdma_gin/nccl_ofi_rdma_gin_types.h"
 
 #include "nccl_ofi.h"
 #include "nccl_ofi_gdrcopy.h"
@@ -30,11 +30,13 @@ class nccl_ofi_rdma_gin_listen_comm : public nccl_ofi_gin_listen_comm_t {
 private:
 	nccl_net_ofi_ep_t *ep;
 	nccl_net_ofi_listen_comm *l_comm;
+	nccl_ofi_rdma_gin_ep_t &gin_ep;
 
 public:
 	nccl_ofi_rdma_gin_listen_comm(int dev_arg, nccl_net_ofi_ep_t *ep_arg,
-				 nccl_net_ofi_listen_comm *l_comm_arg)
-	    : ep(ep_arg), l_comm(l_comm_arg)
+				 nccl_net_ofi_listen_comm *l_comm_arg,
+				 nccl_ofi_rdma_gin_ep_t &gin_ep_arg)
+	    : ep(ep_arg), l_comm(l_comm_arg), gin_ep(gin_ep_arg)
 	{
 	}
 

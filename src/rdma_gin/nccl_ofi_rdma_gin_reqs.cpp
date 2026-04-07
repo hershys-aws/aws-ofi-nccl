@@ -4,9 +4,9 @@
 
 #include "config.h"
 
-#include "gin/nccl_ofi_gin.h"
-#include "gin/nccl_ofi_gin_reqs.h"
-#include "gin/nccl_ofi_gin_resources.h"
+#include "rdma_gin/nccl_ofi_rdma_gin.h"
+#include "rdma_gin/nccl_ofi_rdma_gin_reqs.h"
+#include "rdma_gin/nccl_ofi_rdma_gin_resources.h"
 #include "nccl_ofi_tracepoint.h"
 
 int nccl_net_ofi_gin_op_req_t::op_req_ctx::handle_cq_entry(struct fi_cq_entry *cq_entry_base,

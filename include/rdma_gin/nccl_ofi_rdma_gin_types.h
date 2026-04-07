@@ -2,8 +2,8 @@
  * Copyright (c) 2026      Amazon.com, Inc. or its affiliates. All rights reserved.
  */
 
-#ifndef NCCL_OFI_GIN_TYPES_H
-#define NCCL_OFI_GIN_TYPES_H
+#ifndef NCCL_OFI_RDMA_GIN_TYPES_H_
+#define NCCL_OFI_RDMA_GIN_TYPES_H_
 
 #include <stddef.h>
 #include <stdint.h>

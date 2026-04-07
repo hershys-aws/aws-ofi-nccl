@@ -110,7 +110,6 @@ class nccl_net_ofi_ep_t;
 class nccl_net_ofi_plugin_t;
 
 class nccl_ofi_gin_ep_t;
-class nccl_ofi_gin_resources;
 
 class nccl_net_ofi_comm;
 class nccl_net_ofi_listen_comm;
@@ -756,20 +755,6 @@ public:
 		return *domain;
 	}
 
-	/**
-	 * Get pointer to the gin resources associated with this endpoint, or
-	 * nullptr if there are no associated GIN resources.
-	 */
-	inline nccl_ofi_gin_resources *get_gin_resources()
-	{
-		return gin_resources;
-	}
-
-	inline void set_gin_resources(nccl_ofi_gin_resources *gin_resources_arg)
-	{
-		this->gin_resources = gin_resources_arg;
-	}
-
 protected:
 	/**
 	 * @brief	Virtual destructor.
@@ -810,11 +795,6 @@ protected:
 	 * zero. sendrecv_release_ep() releases the resources if the
 	 * reference counter is decreased down to zero. */
 	int ref_cnt;
-
-	/**
-	 * Associated GIN resources object
-	 */
-	nccl_ofi_gin_resources *gin_resources = nullptr;
 };
 
 enum nccl_net_ofi_comm_type_t {

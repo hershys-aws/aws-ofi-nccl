@@ -2,8 +2,8 @@
  * Copyright (c) 2026      Amazon.com, Inc. or its affiliates. All rights reserved.
  */
 
-#ifndef NCCL_OFI_GIN_RESOURCES_H
-#define NCCL_OFI_GIN_RESOURCES_H
+#ifndef NCCL_OFI_RDMA_GIN_RESOURCES_H_
+#define NCCL_OFI_RDMA_GIN_RESOURCES_H_
 
 #include "rdma/fabric.h"
 
@@ -13,8 +13,8 @@
 #include <unordered_map>
 
 #include "nccl_ofi_gin_base.h"
-#include "gin/nccl_ofi_gin_reqs.h"
-#include "gin/nccl_ofi_gin_types.h"
+#include "rdma_gin/nccl_ofi_rdma_gin_reqs.h"
+#include "rdma_gin/nccl_ofi_rdma_gin_types.h"
 #include "nccl_ofi_freelist.h"
 #include "nccl_ofi_scheduler.h"
 
@@ -109,6 +109,15 @@ public:
 
 	std::mutex ep_lock;
 
+	/**
+	 * Get or lazily create the GIN resources for this endpoint.
+	 * Resources are shared across all comms on this EP.
+	 *
+	 * @param net_ep: The net transport EP whose refcount is held
+	 *                while resources exist (for EP lifetime management)
+	 */
+	nccl_ofi_gin_resources &get_or_create_resources(nccl_net_ofi_ep_t &net_ep);
+
 private:
 	nccl_net_ofi_domain_t &domain;
 
@@ -136,6 +145,9 @@ private:
 	 * Process all completions for the given rail
 	 */
 	int gin_process_cq_rail(uint16_t rail_id);
+
+	/* Owned GIN resources, lazily created by get_or_create_resources() */
+	std::unique_ptr<nccl_ofi_gin_resources> owned_resources;
 };
 
 /**
@@ -194,7 +206,6 @@ struct nccl_ofi_gin_ep_holder {
 
 	~nccl_ofi_gin_ep_holder()
 	{
-		ep.set_gin_resources(nullptr);
 		ep.release_ep(false, false);
 	}
 };
@@ -204,7 +215,7 @@ struct nccl_ofi_gin_ep_holder {
  */
 class nccl_ofi_gin_resources {
 public:
-	nccl_ofi_gin_resources(nccl_net_ofi_ep_t &ep_arg);
+	nccl_ofi_gin_resources(nccl_net_ofi_ep_t &ep_arg, nccl_ofi_rdma_gin_ep_t &gin_ep_arg);
 
 	~nccl_ofi_gin_resources();
 
@@ -351,7 +362,7 @@ private:
 
 	nccl_ofi_idpool_t comm_id_pool;
 
-	nccl_ofi_rdma_gin_ep_t gin_ep;
+	nccl_ofi_rdma_gin_ep_t &gin_ep;
 
 	/**
 	 * Queue of pending Libfabric requests to be retried

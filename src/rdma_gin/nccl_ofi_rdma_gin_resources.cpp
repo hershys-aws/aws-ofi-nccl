@@ -4,9 +4,9 @@
 
 #include "config.h"
 
-#include "gin/nccl_ofi_gin_resources.h"
-#include "gin/nccl_ofi_gin.h"
-#include "gin/nccl_ofi_gin_reqs.h"
+#include "rdma_gin/nccl_ofi_rdma_gin_resources.h"
+#include "rdma_gin/nccl_ofi_rdma_gin.h"
+#include "rdma_gin/nccl_ofi_rdma_gin_reqs.h"
 
 #include "nccl_ofi_assert.h"
 #include "nccl_ofi_cuda.h"
@@ -15,6 +15,7 @@
 #include "nccl_ofi_param.h"
 #include "nccl_ofi.h"
 #include "nccl_ofi_log.h"
+#include "nccl_ofi_rdma.h"
 
 nccl_ofi_rdma_gin_ep_t::nccl_ofi_rdma_gin_ep_t(nccl_net_ofi_domain_t &domain_arg) : domain(domain_arg)
 {
@@ -42,8 +43,25 @@ int nccl_ofi_rdma_gin_ep_t::listen(int dev, uint64_t comm_id,
 		return ret;
 	}
 
-	*listen_comm = new nccl_ofi_rdma_gin_listen_comm(dev, ep, l_comm);
+	*listen_comm = new nccl_ofi_rdma_gin_listen_comm(dev, ep, l_comm, *this);
 	return 0;
+}
+
+nccl_ofi_gin_resources &nccl_ofi_rdma_gin_ep_t::get_or_create_resources(nccl_net_ofi_ep_t &net_ep)
+{
+	if (!owned_resources) {
+		owned_resources = std::make_unique<nccl_ofi_gin_resources>(net_ep, *this);
+	}
+	return *owned_resources;
+}
+
+/* Caller must hold the device lock */
+nccl_ofi_gin_ep_t *nccl_net_ofi_rdma_domain_t::get_gin_ep()
+{
+	if (!cached_gin_ep) {
+		cached_gin_ep = std::make_unique<nccl_ofi_rdma_gin_ep_t>(*this);
+	}
+	return cached_gin_ep.get();
 }
 
 nccl_ofi_rdma_gin_ep_t::~nccl_ofi_rdma_gin_ep_t()
@@ -442,8 +460,8 @@ void nccl_ofi_gin_resources::post_rx_buffs_on_rail(nccl_ofi_gin_ep_rail_t &rail,
 	}
 }
 
-nccl_ofi_gin_resources::nccl_ofi_gin_resources(nccl_net_ofi_ep_t &ep_arg)
-    : ep_holder(ep_arg), gin_comms(), comm_id_pool(GIN_MAX_COMMS), gin_ep(ep_arg.get_domain()),
+nccl_ofi_gin_resources::nccl_ofi_gin_resources(nccl_net_ofi_ep_t &ep_arg, nccl_ofi_rdma_gin_ep_t &gin_ep_arg)
+    : ep_holder(ep_arg), gin_comms(), comm_id_pool(GIN_MAX_COMMS), gin_ep(gin_ep_arg),
       req_fl(nullptr, &freelist_deleter),
       rx_buff_fl(nullptr, &freelist_deleter),
       ack_send_fl(nullptr, &freelist_deleter)

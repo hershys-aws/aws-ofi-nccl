@@ -4,7 +4,7 @@
 
 #include "config.h"
 
-#include "gin/nccl_ofi_gin.h"
+#include "rdma_gin/nccl_ofi_rdma_gin.h"
 
 #include "nccl_ofi_assert.h"
 #include "nccl_ofi_gdrcopy.h"
@@ -148,21 +148,17 @@ int nccl_ofi_rdma_gin_listen_comm::connect(nccl_net_ofi_conn_handle_t *handles[]
 		}
 	}
 
-	/* Get or create GIN resources on the transport endpoint */
-	auto *resources = ep->get_gin_resources();
-	if (resources == nullptr) {
-		resources = new nccl_ofi_gin_resources(*ep);
-		ep->set_gin_resources(resources);
-	}
+	/* Get or create GIN resources on the GIN endpoint */
+	auto &resources = gin_ep.get_or_create_resources(*ep);
 
 	nccl_ofi_rdma_gin_put_comm *gin_comm =
-		new nccl_ofi_rdma_gin_put_comm(*resources, rank, nranks, s_comm, r_comm);
+		new nccl_ofi_rdma_gin_put_comm(resources, rank, nranks, s_comm, r_comm);
 
 	std::vector<gin_connect_handle> all_handles(nranks, gin_connect_handle {});
 	gin_connect_handle &my_gin_handle = all_handles[rank];
 
-	auto &gin_ep = gin_comm->resources.get_ep();
-
+	/* gin_ep and gin_comm->resources.get_ep() are the same object —
+	   the domain's single GIN EP, shared by all comms */
 	std::lock_guard scoped_ep_lock(gin_ep.ep_lock);
 	const int num_rails = static_cast<int>(gin_ep.get_num_rails());
 

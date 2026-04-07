@@ -2,10 +2,10 @@
  * Copyright (c) 2026      Amazon.com, Inc. or its affiliates. All rights reserved.
  */
 
-#ifndef NCCL_OFI_GIN_REQS_H
-#define NCCL_OFI_GIN_REQS_H
+#ifndef NCCL_OFI_RDMA_GIN_REQS_H_
+#define NCCL_OFI_RDMA_GIN_REQS_H_
 
-#include "gin/nccl_ofi_gin_types.h"
+#include "rdma_gin/nccl_ofi_rdma_gin_types.h"
 #include "nccl_ofi.h"
 #include "nccl_ofi_freelist.h"
 #include "nccl_ofi_tracepoint.h"
