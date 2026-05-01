@@ -181,9 +181,6 @@ ncclResult_t nccl_net_ofi_listen(int dev_id, void *handle, void **lComm,
 		}
 
 		ret = ep->listen(static_cast<nccl_net_ofi_conn_handle_t *>(handle), listen_comm);
-		if (ret == 0 && *listen_comm != nullptr) {
-			(*listen_comm)->ep = ep;
-		}
 	}
 	catch (const std::exception &e) {
 		NCCL_OFI_WARN("Caught exception in plugin listen: %s", e.what());

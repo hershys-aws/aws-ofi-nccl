@@ -172,14 +172,6 @@ ncclResult_t nccl_ofi_gin_listen(void *ctx, int dev, void *handle, void **listen
 			return nccl_net_ofi_retval_translate(ret);
 		}
 
-		/* TODO: ep->listen() creates the listen_comm but does
-		 * not set l_comm->ep. The API listen() path sets it
-		 * after ep->listen() returns. GIN calls ep->listen()
-		 * directly, so it must also set l_comm->ep here.
-		 * Both callers need this for accept() to propagate
-		 * the ep to the recv_comm. */
-		l_comm->ep = ep;
-
 		*listenComm = new nccl_ofi_rdma_gin_listen_comm(dev, ep, l_comm);
 	} catch (const std::exception &e) {
 		NCCL_OFI_WARN("Caught exception in GIN listen: %s", e.what());
