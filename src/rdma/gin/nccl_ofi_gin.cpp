@@ -639,6 +639,79 @@ int nccl_ofi_rdma_gin_put_comm::iputSignal(uint64_t srcOff, nccl_ofi_gin_symm_mr
 	return 0;
 }
 
+/* Walk all MAX_NUM_RAILS slots — including any subreqs that returned -FI_EAGAIN
+   on post() and got queued via add_pending_req — so none retain a pending_flag
+   pointing into the umbrella iget_req we are about to free. */
+static inline void clear_read_reqs_pending_back_pointers(
+	std::array<nccl_net_ofi_gin_read_req_t *, MAX_NUM_RAILS> &read_reqs)
+{
+	for (uint16_t i = 0; i < MAX_NUM_RAILS; i++) {
+		if (read_reqs[i]) {
+			read_reqs[i]->pending_flag = nullptr;
+		}
+	}
+}
+
+int nccl_ofi_rdma_gin_put_comm::iget(uint64_t remoteOff,
+				      nccl_ofi_gin_symm_mr_handle_t *remoteMhandle,
+				      size_t size, uint64_t localOff,
+				      nccl_ofi_gin_symm_mr_handle_t *localMhandle,
+				      uint32_t dst_rank, nccl_ofi_gin_req_t **request)
+{
+	auto *remote_mr_handle = static_cast<nccl_ofi_rdma_gin_symm_mr_handle *>(remoteMhandle);
+	auto *local_mr_handle = static_cast<nccl_ofi_rdma_gin_symm_mr_handle *>(localMhandle);
+	auto &gin_ep = resources.get_ep();
+	auto &rank_comm = rank_comms[dst_rank];
+	auto &remote_mr = remote_mr_handle->remote_mr[dst_rank];
+	auto *local_handle = local_mr_handle->local_handle;
+	auto *scheduler = gin_ep.get_scheduler();
+
+	std::lock_guard scoped_ep_lock(gin_ep.ep_lock);
+
+	auto *iget_req = resources.get_req_from_pool<nccl_ofi_gin_iget_req>(resources);
+	std::array<nccl_net_ofi_gin_read_req_t *, MAX_NUM_RAILS> read_reqs {};
+
+	const auto schedule = scheduler->get_schedule(size, gin_ep.get_num_rails());
+	auto &xfers = schedule->rail_xfer_infos;
+	uint16_t num_xfers = schedule->num_xfer_infos;
+
+	for (uint16_t i = 0; i < num_xfers; i++) {
+		nccl_net_ofi_xfer_info_t *xfer_info = &xfers[i];
+		void *local_buf = static_cast<uint8_t *>(local_mr_handle->input_address) +
+				  localOff + xfer_info->offset;
+		void *desc = fi_mr_desc(local_handle->get_mr(xfer_info->rail_id));
+		uint64_t remote_offset = remote_mr.address_offset + remoteOff + xfer_info->offset;
+
+		auto *read_req = resources.get_req_from_pool<nccl_net_ofi_gin_read_req_t>(
+			resources,
+			gin_ep.get_rail(xfer_info->rail_id).ofi_ep.get(),
+			local_buf, xfer_info->msg_size, desc,
+			rank_comm.address[xfer_info->rail_id],
+			remote_offset, remote_mr.mr_key[xfer_info->rail_id]);
+
+		read_req->pending_flag = &(iget_req->reqs_pending[i]);
+		iget_req->reqs_pending[i] = true;
+		read_reqs[i] = read_req;
+
+		int ret = read_req->post();
+		if (ret == -FI_EAGAIN) {
+			resources.add_pending_req(read_req);
+		} else if (OFI_UNLIKELY(ret != 0)) {
+			NCCL_OFI_WARN("fi_read iget failed on rail %u: %d",
+				      xfer_info->rail_id, ret);
+			nccl_net_ofi_release_schedule(scheduler, schedule);
+			clear_read_reqs_pending_back_pointers(read_reqs);
+			resources.return_req_to_pool(iget_req);
+			return ret;
+		}
+	}
+
+	nccl_net_ofi_release_schedule(scheduler, schedule);
+
+	*request = iget_req;
+	return 0;
+}
+
 static inline uint32_t get_peer_rank(fi_addr_t src_addr,
 				     std::unordered_map<fi_addr_t, uint32_t> &rank_map)
 {

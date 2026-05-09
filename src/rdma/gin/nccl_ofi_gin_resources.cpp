@@ -175,8 +175,8 @@ static int set_mr_req_attr(uint64_t mr_key, nccl_ofi_mr_ckey_ref ckey, uint64_t 
 {
 	int ret = 0;
 
-	/* Basic put-signal access */
-	mr_attr->access = FI_WRITE | FI_REMOTE_WRITE;
+	/* Basic put-signal access + read access for iget */
+	mr_attr->access = FI_WRITE | FI_REMOTE_WRITE | FI_READ | FI_REMOTE_READ;
 	nccl_ofi_mr_ckey_fill_mr_attrs(ckey, mr_attr, flags);
 
 	switch (type) {
