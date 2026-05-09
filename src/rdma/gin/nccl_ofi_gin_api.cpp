@@ -280,7 +280,7 @@ ncclResult_t nccl_ofi_gin_closeListen(void *listenComm)
 
 static ncclResult_t nccl_ofi_gin_test(void *collComm, void *request, int *done)
 {
-	auto *req = static_cast<nccl_ofi_rdma_gin_iputsignal_req *>(request);
+	auto *req = static_cast<nccl_ofi_gin_req_t *>(request);
 	int ret = req->test(done);
 	return nccl_net_ofi_retval_translate(ret);
 }
@@ -314,6 +314,24 @@ static ncclResult_t nccl_ofi_gin_iput(void *collComm, uint64_t srcOff, void *src
 	   iputSignal with a zero'd signal address (instead of a write-without-immediate) */
 	return nccl_ofi_gin_iputSignal(collComm, srcOff, srcMhandle, size, dstOff, dstMhandle, rank,
 				       0, nullptr, 0, 0, request);
+}
+
+static ncclResult_t nccl_ofi_gin_iget(void *collComm, uint64_t remoteOff, void *remoteMhandle,
+				      size_t size, uint64_t localOff, void *localMhandle,
+				      uint32_t rank, void **request)
+{
+	auto *gin_comm = static_cast<nccl_ofi_rdma_gin_put_comm *>(collComm);
+	auto *remote_mr = static_cast<nccl_ofi_gin_symm_mr_handle_t *>(remoteMhandle);
+	auto *local_mr = static_cast<nccl_ofi_gin_symm_mr_handle_t *>(localMhandle);
+
+	nccl_ofi_gin_req_t *req = nullptr;
+	int ret = gin_comm->iget(remoteOff, remote_mr, size, localOff, local_mr, rank, &req);
+	if (ret != 0) {
+		return nccl_net_ofi_retval_translate(ret);
+	}
+
+	*request = req;
+	return ncclSuccess;
 }
 
 ncclResult_t nccl_ofi_gin_finalize(void *ctx)
@@ -416,6 +434,14 @@ static ncclResult_t nccl_ofi_gin_iputSignal_v13(void *ginCtx, int context, uint6
 				       signalValue, signalOp, request);
 }
 
+static ncclResult_t nccl_ofi_gin_iget_v13(void *ginCtx, int context, uint64_t remoteOff,
+					  void *remoteMhandle, size_t size, uint64_t localOff,
+					  void *localMhandle, uint32_t rank, void **request)
+{
+	return nccl_ofi_gin_iget(ginCtx, remoteOff, remoteMhandle, size,
+				 localOff, localMhandle, rank, request);
+}
+
 NCCL_OFI_EXPORT_SYMBOL ncclGin_v11_t ncclGinPlugin_v11 = {
 	/* Since there is no equivalent of NCCL_NET for GIN, currently we don't
 	   have name fixup depending on env var like nvidia_plugin_name_fixup().
@@ -461,7 +487,7 @@ NCCL_OFI_EXPORT_SYMBOL ncclGin_v13_t ncclGinPlugin_v13 = {
 	.closeListen = nccl_ofi_gin_closeListen,
 	.iput = nccl_ofi_gin_iput_v13,
 	.iputSignal = nccl_ofi_gin_iputSignal_v13,
-	.iget = nullptr,
+	.iget = nccl_ofi_gin_iget_v13,
 	.iflush = nullptr,
 	.test = nccl_ofi_gin_test,
 	.ginProgress = nccl_ofi_gin_ginProgress,

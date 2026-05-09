@@ -271,6 +271,10 @@ public:
 		       nccl_ofi_gin_symm_mr_handle_t *signalMhandle, uint64_t signalValue, uint32_t signalOp,
 		       nccl_ofi_gin_req_t **request) override;
 
+	int iget(uint64_t remoteOff, nccl_ofi_gin_symm_mr_handle_t *remoteMhandle,
+		 size_t size, uint64_t localOff, nccl_ofi_gin_symm_mr_handle_t *localMhandle,
+		 uint32_t rank, nccl_ofi_gin_req_t **request) override;
+
 	/**
 	 * Callback for metadata completion.
 	 *

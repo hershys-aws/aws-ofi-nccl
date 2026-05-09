@@ -300,3 +300,43 @@ nccl_net_ofi_gin_metadata_send_req_t::~nccl_net_ofi_gin_metadata_send_req_t()
 {
 	metadata_fl->entry_free(metadata_elem);
 }
+
+int nccl_net_ofi_gin_read_req_t::post()
+{
+	ssize_t rc = fi_read(ep, local_buf, size, desc, remote_addr,
+			     remote_offset, remote_key, &ctx.ofi_ctx);
+
+	if (rc != 0 && rc != -FI_EAGAIN) {
+		NCCL_OFI_WARN("Failed call to fi_read; RC: %zd", rc);
+	}
+
+	return rc;
+}
+
+int nccl_net_ofi_gin_read_req_t::handle_cq_entry(struct fi_cq_entry * /*cq_entry_base*/,
+						 fi_addr_t /*src_addr*/, uint16_t /*rail_id*/)
+{
+	if (OFI_LIKELY(pending_flag != nullptr)) {
+		*pending_flag = false;
+	}
+
+	resources.return_req_to_pool(this);
+
+	return 0;
+}
+
+int nccl_ofi_gin_iget_req::test(int *done)
+{
+	*done = 0;
+	if (OFI_UNLIKELY(any_reqs_pending == 0)) {
+		*done = 1;
+		auto &gin_ep = resources.get_ep();
+		std::lock_guard scoped_ep_lock(gin_ep.ep_lock);
+		resources.return_req_to_pool(this);
+	}
+	/* If subrequests are still pending, NCCL's progress thread continually
+	   calls ginProgress, which drives CQ processing and clears pending
+	   flags as completions arrive. */
+
+	return 0;
+}
