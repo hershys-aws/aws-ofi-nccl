@@ -276,9 +276,55 @@ int main(int argc, char *argv[])
 	}
 
 	/* Verification */
-	NCCL_OFI_INFO(NCCL_NET, "Verifying result..");
+	NCCL_OFI_INFO(NCCL_NET, "=== Verifying iput/iputSignal result ===");
 	OFINCCLCHECK(verify_buff(rank, put_buff, send_val));
 	OFINCCLCHECK(verify_buff(rank, put_signal_buff, send_val));
+
+	/*
+	 * iget test: rank 0 registers a buffer filled with a distinct value
+	 * (iget_val=99). Rank 1+ uses iget to read it into a local buffer
+	 * (initialized to 0), then verifies the contents are 99.
+	 * This ensures the data came from the remote read, not stale local
+	 * state or leftover iput data (which uses send_val=42).
+	 */
+	const int iget_val = 99;
+	void *get_src_buff = nullptr;
+	void *get_src_mhandle = nullptr;
+	OFINCCLCHECK(alloc_and_reg_buff(extGin, collComm, SEND_SIZE, buffer_type,
+					(rank == 0) ? iget_val : 0, &get_src_buff,
+					&get_src_mhandle));
+
+	void *get_buff = nullptr;
+	void *get_mhandle = nullptr;
+	OFINCCLCHECK(alloc_and_reg_buff(extGin, collComm, SEND_SIZE, buffer_type, 0, &get_buff,
+					&get_mhandle));
+
+	MPI_Barrier(MPI_COMM_WORLD);
+
+	if (rank != 0) {
+		std::deque<void *> get_request_deque;
+
+		void *request = nullptr;
+		OFINCCLCHECK(extGin->iget(proxyCtx, 0, 0, get_src_mhandle, SEND_SIZE, 0,
+					  get_mhandle, 0, &request));
+		assert(request != nullptr);
+		get_request_deque.push_back(request);
+
+		while (!get_request_deque.empty()) {
+			OFINCCLCHECK(poll_request_completion(extGin, get_request_deque, collComm,
+							    proxyCtx));
+		}
+
+		NCCL_OFI_INFO(NCCL_NET, "=== Verifying iget result ===");
+		OFINCCLCHECK(verify_buff(rank, get_buff, iget_val));
+	}
+
+	MPI_Barrier(MPI_COMM_WORLD);
+
+	OFINCCLCHECK(extGin->deregMrSym(collComm, get_src_mhandle));
+	get_src_mhandle = nullptr;
+	OFINCCLCHECK(extGin->deregMrSym(collComm, get_mhandle));
+	get_mhandle = nullptr;
 
 	/* Cleanup APIs */
 	OFINCCLCHECK(extGin->deregMrSym(collComm, signal_mhandle));
@@ -305,6 +351,10 @@ int main(int argc, char *argv[])
 	MPI_Finalize();
 
 	/* Clean up local resources */
+	OFINCCLCHECK(deallocate_buffer(get_src_buff, buffer_type));
+	get_src_buff = nullptr;
+	OFINCCLCHECK(deallocate_buffer(get_buff, buffer_type));
+	get_buff = nullptr;
 	OFINCCLCHECK(deallocate_buffer(signal_buf, buffer_type));
 	signal_buf = nullptr;
 	OFINCCLCHECK(deallocate_buffer(put_signal_buff, buffer_type));
