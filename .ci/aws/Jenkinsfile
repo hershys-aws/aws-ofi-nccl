@@ -189,7 +189,7 @@ pipeline {
                             exit 0
                         fi
                         echo "${CHANGE_AUTHOR} has ${PERM} repo access, checking approved authors list..."
-                        if awk '{print $1}' /tmp/approved_authors.txt | grep -qx "${CHANGE_AUTHOR}"; then
+                        if awk '{print $1}' /tmp/approved_authors.txt | grep -qxF "${CHANGE_AUTHOR}"; then
                             echo "✅ ${CHANGE_AUTHOR} is on the approved authors list"
                             exit 0
                         fi
