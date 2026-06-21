@@ -510,13 +510,41 @@ int nccl_ofi_rdma_gin_put_comm::iputSignal(uint64_t srcOff, nccl_ofi_gin_symm_mr
 	uint16_t rail_id = 0;
 
 	/* Outstanding window. Cursors live on the GIN_RX_CONSUMED_MASK ring,
-	   so all comparisons mask the modular subtraction. */
-	const uint32_t outstanding = gin_cursor_delta(rank_comm.tx_head, rank_comm.tx_tail);
-	if (OFI_UNLIKELY(outstanding >= (uint32_t)(GIN_IMM_SEQ_MASK + 1))) {
-		NCCL_OFI_WARN("Outstanding window full (head=%u tail=%u)",
-			      rank_comm.tx_head, rank_comm.tx_tail);
-		assert(false);
-		return -EBUSY;
+	   so all comparisons mask the modular subtraction.
+
+	   A full window is normal backpressure, not an error: we've sent
+	   GIN_IMM_SEQ_MASK+1 ops the receiver hasn't acknowledged yet. Don't abort --
+	   keep driving progress until ACKs advance tx_tail and free a slot, then fall
+	   through to post. We can't just return -EBUSY: NCCL calls iputSignal through
+	   NCCLCHECK, so any nonzero return becomes ncclSystemError and kills the proxy.
+	   The ACK path updates the cursors under ep_lock, so we read `outstanding`
+	   under it too, dropping the lock only around each yield (then re-reading) so
+	   other threads can make progress. */
+	uint32_t outstanding;
+	{
+		std::unique_lock<std::mutex> scoped_ep_lock(gin_ep.ep_lock);
+		outstanding = gin_cursor_delta(rank_comm.tx_head, rank_comm.tx_tail);
+		while (OFI_UNLIKELY(outstanding >= (uint32_t)(GIN_IMM_SEQ_MASK + 1))) {
+			int prog = resources.progress();
+			if (OFI_UNLIKELY(prog != 0)) {
+				return prog;
+			}
+			/* Mirror the per-tick GIN proxy progress: also reap the gdrcopy
+			   worker's done queue, since the ACK that frees our window can be
+			   gated behind a signal-delivery hand-off that only
+			   drain_gdrcopy_done_queue() clears. */
+			prog = drain_gdrcopy_done_queue();
+			if (OFI_UNLIKELY(prog != 0)) {
+				return prog;
+			}
+			/* Drop the lock around the yield so other threads (and this
+			   endpoint's own completions) advance tx_tail. unique_lock tracks
+			   ownership, so its destructor won't double-unlock. */
+			scoped_ep_lock.unlock();
+			std::this_thread::yield();
+			scoped_ep_lock.lock();
+			outstanding = gin_cursor_delta(rank_comm.tx_head, rank_comm.tx_tail);
+		}
 	}
 
 	/* Determine if this message needs an ACK.

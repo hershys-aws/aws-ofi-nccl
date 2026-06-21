@@ -4,6 +4,8 @@
 
 #include "config.h"
 
+#include <atomic>
+#include <cstdint>
 #include <cstring>
 
 #include "rdma/gin/nccl_ofi_gin.h"
@@ -19,18 +21,32 @@
 /* Forward declaration — defined at bottom of this file */
 extern ncclGin_v13_t ncclGinPlugin_v13;
 
+/* Process-global monotonic counter giving every init() call (every
+ * nccl_ofi_gin_context) a distinct endpoint cache key. NCCL drives this same
+ * .so twice per communicator — once as the RMA backend, once as the GIN proxy —
+ * both with the identical commId (commHash). Keying the transport endpoint on
+ * commId alone makes both layers share one cached endpoint and one ep_lock,
+ * serializing the GIN and RMA progress threads (the 2-3x slowdown). A per-object
+ * instance id keeps the two layers on separate endpoints. */
+static std::atomic<uint64_t> gin_context_instance_counter{0};
+
 /**
  * Structure to hold GIN context data.
- * This is created once per NCCL communicator and passed to all listen() calls
- * for that communicator. It stores the comm_id which is used as the endpoint
- * key, ensuring different communicators get different endpoints even when
- * created on the same thread.
+ * This is created once per NCCL communicator-layer (NCCL calls init() once per
+ * layer: RMA backend + GIN proxy) and passed to all listen() calls for that
+ * layer. comm_id (commHash) is retained for tracing/logging; instance_id is the
+ * process-unique endpoint cache key, so each init() layer lands on its own
+ * endpoint instead of sharing one.
  */
 struct nccl_ofi_gin_context {
-	uint64_t comm_id; // Unique communicator identifier (from commHash)
-	
-	// Constructor to initialize comm_id
-	explicit nccl_ofi_gin_context(uint64_t id) : comm_id(id) {}
+	uint64_t comm_id;     // commHash — retained for TRACE/logging
+	uint64_t instance_id; // process-unique per init() call; endpoint cache key
+
+	explicit nccl_ofi_gin_context(uint64_t id)
+		: comm_id(id),
+		  instance_id(gin_context_instance_counter.fetch_add(1, std::memory_order_relaxed))
+	{
+	}
 };
 
 ncclResult_t nccl_ofi_gin_init(void **ctx, uint64_t commId, ncclDebugLogger_t logFunction)
@@ -173,7 +189,7 @@ ncclResult_t nccl_ofi_gin_listen(void *ctx, int dev, void *handle, void **listen
 		return ncclInternalError;
 	}
 
-	uint64_t comm_id = context->comm_id;
+	long endpoint_key = static_cast<long>(context->instance_id);
 
 	auto plugin = nccl_net_ofi_get_plugin();
 	if (plugin == nullptr) {
@@ -191,14 +207,19 @@ ncclResult_t nccl_ofi_gin_listen(void *ctx, int dev, void *handle, void **listen
 		/* Note: although the GIN plugin uses its own endpoint type, we still need
 		the transport endpoint to set up the bootstrap AG ring.
 
-		Use comm_id as endpoint_key to ensure all GIN contexts within the same
-		communicator share the same endpoint. This creates one endpoint per
-		communicator instead of one per thread.
-		
-		domain_key=0 uses the default domain, endpoint_key=comm_id caches endpoints
-		by communicator ID instead of thread ID. */
+		Key the endpoint cache on the context's instance_id (process-unique per
+		init() call), NOT on comm_id. NCCL calls init() twice per communicator —
+		once as the RMA backend, once as the GIN proxy — both with the same
+		commId/commHash. Keying on comm_id makes both layers resolve to one shared
+		endpoint and one ep_lock, serializing the GIN and RMA progress threads.
+		instance_id gives each layer its own endpoint. All listen() calls for a
+		single context share that one context object (same instance_id), so they
+		still coalesce onto one endpoint per device.
 
-		auto ep = device->get_ep(0, static_cast<long>(comm_id));
+		endpoint_key is a purely local ep_table cache key (never on the wire), so
+		choosing it freely / non-deterministically across ranks is safe. */
+
+		auto ep = device->get_ep(0, endpoint_key);
 
 		nccl_net_ofi_listen_comm *l_comm = nullptr;
 		int ret = ep->listen(static_cast<nccl_net_ofi_conn_handle_t *>(handle), &l_comm);
