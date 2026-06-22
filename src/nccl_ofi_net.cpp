@@ -740,8 +740,10 @@ std::shared_ptr<nccl_net_ofi_domain_t> nccl_net_ofi_device_t::get_domain(unsigne
 	 * a new domain to prevent unbounded table growth. */
 	purge_expired_weak_ptrs(this->domain_table);
 
-	/* Create new domain and insert weak_ptr into table */
-	auto *raw_domain = this->create_domain();
+	/* Separation across keys is already handled by domain_table (keyed on
+	   domain_key); pass the key through only so the domain's own domain_key
+	   member matches its slot rather than defaulting to 0 (diagnostics). */
+	auto *raw_domain = this->create_domain(domain_key);
 	if (raw_domain == nullptr) {
 		NCCL_OFI_WARN("Initializing a new domain for device %s failed",
 			      this->name.c_str());

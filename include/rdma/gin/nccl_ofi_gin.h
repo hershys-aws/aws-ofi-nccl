@@ -18,6 +18,7 @@
 #include <bitset>
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <thread>
 
 /**
@@ -501,6 +502,19 @@ private:
 	nccl_ofi_gin_allgather_comm ag_comm;
 
 	/* --- Private methods --- */
+
+	/**
+	 * Spin the endpoint CQ until `done()` returns true, then return 0.
+	 * Acquires ep_lock around each progress() + done() evaluation (so done()
+	 * sees a consistent cursor view) and yields between iterations. If
+	 * timeout_sec > 0 and it elapses first, returns -EBUSY; if 0, waits
+	 * forever. Returns any nonzero progress() error immediately. Shared by
+	 * await_pending_requests() and iputSignal()'s full-window drain.
+	 *
+	 * Caller must NOT hold ep_lock (this takes it internally).
+	 */
+	int progress_until(const std::function<bool()> &done, uint64_t timeout_sec)
+		EXCLUDES(get_ep_lock());
 
 	/**
 	 * Send a standalone ACK via fi_send to the peer carrying our

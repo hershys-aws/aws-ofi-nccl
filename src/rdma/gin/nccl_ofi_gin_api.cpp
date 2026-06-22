@@ -19,6 +19,17 @@
 /* Forward declaration — defined at bottom of this file */
 extern ncclGin_v13_t ncclGinPlugin_v13;
 
+/* NCCL drives this one plugin as two backends — its GIN proxy and its RMA proxy
+ * — and both init() with the same commId. We export a separate init per backend
+ * (nccl_ofi_gin_init / nccl_ofi_rma_init) so we can tell them apart and give RMA
+ * its own OFI domain, instead of both colliding on one endpoint + ep_lock. */
+enum class gin_subsystem { GIN, RMA };
+
+/* OFI domain keys (passed to get_ep/get_domain). RMA gets its own domain so it
+ * doesn't share an endpoint/CQ/ep_lock with GIN; GIN keeps the default 0. */
+static constexpr unsigned int GIN_DOMAIN_KEY = 0u;
+static constexpr unsigned int RMA_DOMAIN_KEY = 0x524D41u; /* "RMA" */
+
 /**
  * Structure to hold GIN context data.
  * This is created once per NCCL communicator and passed to all listen() calls
@@ -28,18 +39,20 @@ extern ncclGin_v13_t ncclGinPlugin_v13;
  */
 struct nccl_ofi_gin_context {
 	uint64_t comm_id; // Unique communicator identifier (from commHash)
-	
-	// Constructor to initialize comm_id
-	explicit nccl_ofi_gin_context(uint64_t id) : comm_id(id) {}
+	gin_subsystem subsystem; // GIN or RMA — which backend made this
+
+	nccl_ofi_gin_context(uint64_t id, gin_subsystem sub) : comm_id(id), subsystem(sub) {}
 };
 
-ncclResult_t nccl_ofi_gin_init(void **ctx, uint64_t commId, ncclDebugLogger_t logFunction)
+static ncclResult_t nccl_ofi_gin_init_tagged(gin_subsystem subsystem, void **ctx,
+					     uint64_t commId, ncclDebugLogger_t logFunction)
 {
 	if (ofi_log_function == nullptr) {
 		ofi_log_function = logFunction;
 	}
 
-	NCCL_OFI_INFO(NCCL_NET | NCCL_INIT, "gin: Initializing");
+	NCCL_OFI_INFO(NCCL_NET | NCCL_INIT, "gin: init subsystem=%s commId=0x%lx",
+		      subsystem == gin_subsystem::RMA ? "RMA" : "GIN", (unsigned long)commId);
 
 	/* GIN requires the OFI NET plugin to be initialized first. If NCCL
 	   selected a different NET transport (e.g. NCCL_NET=Socket), the
@@ -80,7 +93,7 @@ ncclResult_t nccl_ofi_gin_init(void **ctx, uint64_t commId, ncclDebugLogger_t lo
 	   endpoint lookup, giving each NCCL communicator its own
 	   endpoint instead of sharing one per thread. */
 	try {
-		nccl_ofi_gin_context *context = new nccl_ofi_gin_context(commId);
+		nccl_ofi_gin_context *context = new nccl_ofi_gin_context(commId, subsystem);
 		*ctx = context;
 	} catch (const std::exception &e) {
 		NCCL_OFI_WARN("Failed to allocate GIN context: %s", e.what());
@@ -118,6 +131,19 @@ ncclResult_t nccl_ofi_gin_init(void **ctx, uint64_t commId, ncclDebugLogger_t lo
 	}
 
 	return ncclSuccess;
+}
+
+/* NCCL binds these two via separate exported symbols (ncclGinPlugin_* and
+   ncclRmaPlugin_v13), so the GIN-proxy and RMA-proxy contexts get tagged
+   differently and land on different OFI domains. */
+ncclResult_t nccl_ofi_gin_init(void **ctx, uint64_t commId, ncclDebugLogger_t logFunction)
+{
+	return nccl_ofi_gin_init_tagged(gin_subsystem::GIN, ctx, commId, logFunction);
+}
+
+ncclResult_t nccl_ofi_rma_init(void **ctx, uint64_t commId, ncclDebugLogger_t logFunction)
+{
+	return nccl_ofi_gin_init_tagged(gin_subsystem::RMA, ctx, commId, logFunction);
 }
 
 ncclResult_t nccl_ofi_gin_devices(int *ndev)
@@ -194,11 +220,18 @@ ncclResult_t nccl_ofi_gin_listen(void *ctx, int dev, void *handle, void **listen
 		Use comm_id as endpoint_key to ensure all GIN contexts within the same
 		communicator share the same endpoint. This creates one endpoint per
 		communicator instead of one per thread.
-		
-		domain_key=0 uses the default domain, endpoint_key=comm_id caches endpoints
-		by communicator ID instead of thread ID. */
 
-		auto ep = device->get_ep(0, static_cast<long>(comm_id));
+		Pick the domain by role so RMA and GIN don't share one endpoint/CQ/
+		ep_lock; both keep endpoint_key=comm_id. */
+		const unsigned int domain_key =
+			(context->subsystem == gin_subsystem::RMA) ? RMA_DOMAIN_KEY : GIN_DOMAIN_KEY;
+		/* init() already logged the subsystem+commId at INFO; this is just the
+		   per-listen domain landing, so keep it at TRACE. */
+		NCCL_OFI_TRACE(NCCL_NET, "gin: listen subsystem=%s comm_id=0x%lx domain_key=0x%x dev=%d",
+			       context->subsystem == gin_subsystem::RMA ? "RMA" : "GIN",
+			       (unsigned long)comm_id, domain_key, dev);
+
+		auto ep = device->get_ep(domain_key, static_cast<long>(comm_id));
 
 		nccl_net_ofi_listen_comm *l_comm = nullptr;
 		int ret = ep->listen(static_cast<nccl_net_ofi_conn_handle_t *>(handle), &l_comm);
@@ -570,3 +603,15 @@ NCCL_OFI_EXPORT_SYMBOL ncclGin_v13_t ncclGinPlugin_v13 = {
 	.queryLastError = nullptr,
 	.finalize = nccl_ofi_gin_finalize
 };
+
+/* NCCL's RMA backend dlsyms "ncclRmaPlugin_v13" first (and only falls back to
+   the GIN symbol if it's missing). Exporting it makes NCCL bind RMA here with
+   its own init, so the RMA-proxy context is tagged RMA and gets its own domain.
+   It's ncclGinPlugin_v13 with only .init swapped — built by copy-then-override
+   so the two can't drift slot-by-slot (a missed slot edit would otherwise be
+   invisible). The two v13 vtables are the same type. */
+NCCL_OFI_EXPORT_SYMBOL ncclGin_v13_t ncclRmaPlugin_v13 = []() {
+	ncclGin_v13_t v = ncclGinPlugin_v13;
+	v.init = nccl_ofi_rma_init;
+	return v;
+}();

@@ -406,4 +406,13 @@ OFI_NCCL_PARAM(GIN_TYPE, gin_type, "GIN_TYPE", GIN_TYPE::PROXY)
  */
 OFI_NCCL_PARAM(bool, gin_strong_signal, "GIN_STRONG_SIGNAL", true);
 
+/*
+ * Seconds iputSignal spins draining a full send window before giving up with
+ * -EBUSY. The window only frees on peer acks, so a dead peer would otherwise
+ * hang the (single) GIN progress thread forever. Normal backpressure clears in
+ * microseconds; raise this only for fabrics/jobs where a peer can legitimately
+ * stall a slot for longer. 0 disables the timeout (spin forever — old behavior).
+ */
+OFI_NCCL_PARAM(uint64_t, gin_window_drain_timeout_sec, "GIN_WINDOW_DRAIN_TIMEOUT_SEC", 30);
+
 #endif // End NCCL_OFI_PARAM_H_

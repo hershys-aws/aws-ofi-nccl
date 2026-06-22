@@ -15,7 +15,11 @@
  * by connect() in both proxy and GDAKI modes, and the GDAKI plugin reuses
  * them directly for the entry points it does not specialize.
  */
+/* Two inits, one per backend NCCL drives us as (GIN proxy vs RMA proxy). NCCL
+   binds them via separate symbols (ncclGinPlugin_* / ncclRmaPlugin_v13) so the
+   two contexts get tagged differently and land on different OFI domains. */
 ncclResult_t nccl_ofi_gin_init(void **ctx, uint64_t commId, ncclDebugLogger_t logFunction);
+ncclResult_t nccl_ofi_rma_init(void **ctx, uint64_t commId, ncclDebugLogger_t logFunction);
 ncclResult_t nccl_ofi_gin_devices(int *ndev);
 ncclResult_t nccl_ofi_gin_listen(void *ctx, int dev, void *handle, void **listenComm);
 ncclResult_t nccl_ofi_gin_connect(void *ctx, void *handles[], int nranks, int rank,

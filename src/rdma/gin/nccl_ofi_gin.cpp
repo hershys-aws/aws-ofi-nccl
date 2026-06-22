@@ -4,6 +4,7 @@
 
 #include "config.h"
 
+#include <chrono>
 #include <mutex>
 #include <thread>
 
@@ -427,49 +428,59 @@ int nccl_ofi_rdma_gin_put_comm::deregMrSym(nccl_ofi_gin_symm_mr_handle_t *mr_han
 	return 0;
 }
 
-int nccl_ofi_rdma_gin_put_comm::await_pending_requests()
+/* TSA can't see the lock through the std::function, so the analysis is
+   suppressed here; the lock discipline (take ep_lock around progress()+done())
+   is local and obvious. done() runs under the lock so it sees a consistent
+   cursor view — callers must not re-take ep_lock inside done(). */
+int nccl_ofi_rdma_gin_put_comm::progress_until(const std::function<bool()> &done,
+					       uint64_t timeout_sec) NO_THREAD_SAFETY_ANALYSIS
 {
-	int ret = 0;
 	auto &ep_lock = resources.get_ep().ep_lock;
+	const bool use_deadline = (timeout_sec > 0);
+	const auto deadline = std::chrono::steady_clock::now() +
+			      std::chrono::seconds(timeout_sec);
 
-	NCCL_OFI_TRACE(NCCL_NET, "GIN communicator: awaiting pending acks");
-
-	/* Wait until all ACKs we requested have been received. Only ops
-	   that set is_ack_requested on the wire will generate a standalone
-	   ACK from the receiver. We track the sequence number of the last
-	   request and compare against the last received ACK's rx_consumed.
-	   If we never requested any ACKs, this loop is a no-op.
-
-	   This intentionally replaces the former outstanding_ack_counter
-	   progress loop: per-peer has_pending_ack_request gives precise
-	   drain semantics without requiring a global counter, avoiding the
-	   deadlock where sequential comm teardown within a single process
-	   would stall waiting for a peer whose progress cannot run. */
 	while (true) {
-		bool any_pending = false;
 		{
 			std::lock_guard<std::mutex> lock(ep_lock);
-			for (auto &rank_comm : rank_comms) {
-				if (rank_comm.has_pending_ack_request) {
-					any_pending = true;
-					break;
-				}
+			if (done()) {
+				return 0;
 			}
-			if (any_pending) {
-				ret = resources.progress();
-				if (OFI_UNLIKELY(ret != 0)) {
-					return ret;
-				}
+			int ret = resources.progress();
+			if (OFI_UNLIKELY(ret != 0)) {
+				return ret;
+			}
+			if (done()) {
+				return 0;
 			}
 		}
-		if (!any_pending) {
-			break;
+		if (use_deadline && OFI_UNLIKELY(std::chrono::steady_clock::now() >= deadline)) {
+			return -EBUSY;
 		}
 		/* Let peer's progress thread run (single-process case shares EP). */
 		std::this_thread::yield();
 	}
+}
 
-	return ret;
+int nccl_ofi_rdma_gin_put_comm::await_pending_requests()
+{
+	NCCL_OFI_TRACE(NCCL_NET, "GIN communicator: awaiting pending acks");
+
+	/* Wait until all ACKs we requested have been received. Only ops that set
+	   is_ack_requested on the wire generate a standalone ACK from the receiver,
+	   so if we never requested any this returns immediately. No timeout: comm
+	   teardown must not drop un-acked ops. per-peer has_pending_ack_request
+	   gives precise drain semantics (vs the former global counter), avoiding
+	   the deadlock where sequential teardown in one process would stall on a
+	   peer whose progress can't run. */
+	return progress_until([this]() REQUIRES(get_ep_lock()) {
+		for (auto &rank_comm : rank_comms) {
+			if (rank_comm.has_pending_ack_request) {
+				return false;
+			}
+		}
+		return true;
+	}, /*timeout_sec=*/0);
 }
 
 static inline void clear_write_reqs_pending_back_pointers(
@@ -509,14 +520,31 @@ int nccl_ofi_rdma_gin_put_comm::iputSignal(uint64_t srcOff, nccl_ofi_gin_symm_mr
 	   get_next_rail() when there is no data to coalesce with. */
 	uint16_t rail_id = 0;
 
-	/* Outstanding window. Cursors live on the GIN_RX_CONSUMED_MASK ring,
-	   so all comparisons mask the modular subtraction. */
-	const uint32_t outstanding = gin_cursor_delta(rank_comm.tx_head, rank_comm.tx_tail);
-	if (OFI_UNLIKELY(outstanding >= (uint32_t)(GIN_IMM_SEQ_MASK + 1))) {
-		NCCL_OFI_WARN("Outstanding window full (head=%u tail=%u)",
-			      rank_comm.tx_head, rank_comm.tx_tail);
-		assert(false);
-		return -EBUSY;
+	/* A full window just means acks haven't caught up yet — backpressure, not
+	   an error. Spin the CQ until an ack advances tx_tail and frees a slot.
+	   A slot only frees on a peer ack, so a dead peer would otherwise spin
+	   forever: bail with -EBUSY after the timeout (0 = wait forever).
+
+	   Note this blocks the single GIN progress thread, so other peers' GFDs
+	   wait behind this one until a slot frees. That's inherent to NCCL's GFD
+	   model (it has no requeue path for a deferred op); the timeout bounds the
+	   worst case. Cursors live on the GIN_RX_CONSUMED_MASK ring, so the delta
+	   is computed under the mask. */
+	if (OFI_UNLIKELY(gin_cursor_delta(rank_comm.tx_head, rank_comm.tx_tail) >=
+			 (uint32_t)(GIN_IMM_SEQ_MASK + 1))) {
+		/* has_slot() re-reads under ep_lock inside progress_until. */
+		auto has_slot = [this, dst_rank]() REQUIRES(get_ep_lock()) {
+			auto &rc = rank_comms[dst_rank];
+			return gin_cursor_delta(rc.tx_head, rc.tx_tail) <
+			       (uint32_t)(GIN_IMM_SEQ_MASK + 1);
+		};
+		int ret = progress_until(has_slot, ofi_nccl_gin_window_drain_timeout_sec());
+		if (OFI_UNLIKELY(ret != 0)) {
+			NCCL_OFI_WARN("Outstanding window full draining peer %u "
+				      "(head=%u tail=%u); peer not acking (rc=%d)",
+				      dst_rank, rank_comm.tx_head, rank_comm.tx_tail, ret);
+			return ret;
+		}
 	}
 
 	/* Determine if this message needs an ACK.
@@ -531,6 +559,9 @@ int nccl_ofi_rdma_gin_put_comm::iputSignal(uint64_t srcOff, nccl_ofi_gin_symm_mr
 	bool has_signal = (signalOp != 0);
 	bool is_ack_requested = false;
 
+	/* Recompute post-drain: a slot is now free, but we may still be above the
+	   ack-request threshold. */
+	const uint32_t outstanding = gin_cursor_delta(rank_comm.tx_head, rank_comm.tx_tail);
 	if (OFI_UNLIKELY(outstanding >= GIN_ACK_REQ_THRESHOLD)) {
 		if (OFI_UNLIKELY(rank_comm.consecutive_puts_without_ack++ >= GIN_ACK_INTERVAL)) {
 			is_ack_requested = true;
