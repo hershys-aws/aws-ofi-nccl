@@ -203,4 +203,9 @@ static_assert(
    via a standalone ACK packet carrying its rx_consumed cursor. */
 #define GIN_ACK_REQ_THRESHOLD ((GIN_IMM_SEQ_MASK + 1) / 2)
 
+/* How long iputSignal spins waiting for a full window to drain before bailing
+   with -EBUSY. Long enough that real backpressure never hits it; short enough
+   that a dead peer doesn't hang us forever. */
+#define GIN_WINDOW_DRAIN_TIMEOUT_SEC 30
+
 #endif

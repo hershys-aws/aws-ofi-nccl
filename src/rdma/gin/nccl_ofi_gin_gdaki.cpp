@@ -837,7 +837,8 @@ static ncclResult_t nccl_ofi_gin_gdaki_queryLastError(void *ginCtx, bool *hasErr
  */
 ncclGin_v13_t nccl_ofi_gin_gdaki_plugin = {
 	.name = "Libfabric_GDAKI",
-	.init = nccl_ofi_gin_init,
+	/* See NCCL_OFI_GIN_INIT_VTABLE_FIELD in nccl_ofi_gin_api.h. */
+	.init = NCCL_OFI_GIN_INIT_VTABLE_FIELD(nccl_ofi_gin_gdaki_plugin),
 	.devices = nccl_ofi_gin_devices,
 	.getProperties = nccl_ofi_gin_gdaki_get_properties,
 	.listen = nccl_ofi_gin_listen,

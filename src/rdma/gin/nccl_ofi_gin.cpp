@@ -4,6 +4,7 @@
 
 #include "config.h"
 
+#include <chrono>
 #include <mutex>
 #include <thread>
 
@@ -511,12 +512,35 @@ int nccl_ofi_rdma_gin_put_comm::iputSignal(uint64_t srcOff, nccl_ofi_gin_symm_mr
 
 	/* Outstanding window. Cursors live on the GIN_RX_CONSUMED_MASK ring,
 	   so all comparisons mask the modular subtraction. */
-	const uint32_t outstanding = gin_cursor_delta(rank_comm.tx_head, rank_comm.tx_tail);
+	uint32_t outstanding = gin_cursor_delta(rank_comm.tx_head, rank_comm.tx_tail);
+
+	/* A full window just means acks haven't caught up yet — backpressure,
+	   not an error. Spin the CQ (under ep_lock) until an ack frees a slot.
+	   But a slot only frees on a peer ack, so a dead peer would hang this
+	   progress thread forever; give up with -EBUSY after a timeout. Normal
+	   backpressure clears in microseconds, well under the deadline. */
 	if (OFI_UNLIKELY(outstanding >= (uint32_t)(GIN_IMM_SEQ_MASK + 1))) {
-		NCCL_OFI_WARN("Outstanding window full (head=%u tail=%u)",
-			      rank_comm.tx_head, rank_comm.tx_tail);
-		assert(false);
-		return -EBUSY;
+		const auto deadline = std::chrono::steady_clock::now() +
+				      std::chrono::seconds(GIN_WINDOW_DRAIN_TIMEOUT_SEC);
+		do {
+			{
+				std::lock_guard<std::mutex> drain_lock(gin_ep.ep_lock);
+				int ret = resources.progress();
+				if (OFI_UNLIKELY(ret != 0)) {
+					NCCL_OFI_WARN("Progress failed while draining full window: %d", ret);
+					return ret;
+				}
+			}
+			if (OFI_UNLIKELY(std::chrono::steady_clock::now() >= deadline)) {
+				NCCL_OFI_WARN("Outstanding window full for >%ds draining peer %u "
+					      "(head=%u tail=%u); peer not acking",
+					      GIN_WINDOW_DRAIN_TIMEOUT_SEC, dst_rank,
+					      rank_comm.tx_head, rank_comm.tx_tail);
+				return -EBUSY;
+			}
+			std::this_thread::yield();
+			outstanding = gin_cursor_delta(rank_comm.tx_head, rank_comm.tx_tail);
+		} while (outstanding >= (uint32_t)(GIN_IMM_SEQ_MASK + 1));
 	}
 
 	/* Determine if this message needs an ACK.

@@ -7,6 +7,14 @@
 
 #include "nccl_ofi.h"
 
+/* GIN-proxy and RMA-proxy share this one vtable and init() with the same
+ * commId, so init() takes a role telling us which is calling. Must match
+ * NCCL's ncclPluginSubsystem_t (we don't edit the vendored headers). */
+typedef enum {
+	NCCL_PLUGIN_SUBSYSTEM_GIN = 0,
+	NCCL_PLUGIN_SUBSYSTEM_RMA = 1,
+} ncclPluginSubsystem_t;
+
 /*
  * Shared GIN plugin APIs — defined in nccl_ofi_gin_api.cpp.
  *
@@ -15,7 +23,14 @@
  * by connect() in both proxy and GDAKI modes, and the GDAKI plugin reuses
  * them directly for the entry points it does not specialize.
  */
-ncclResult_t nccl_ofi_gin_init(void **ctx, uint64_t commId, ncclDebugLogger_t logFunction);
+ncclResult_t nccl_ofi_gin_init(void **ctx, uint64_t commId, ncclPluginSubsystem_t subsystem,
+			       ncclDebugLogger_t logFunction);
+
+/* Our init() is 4-arg but the vendored vtable field is still 3-arg, so cast it
+ * in. NCCL calls with 4 args, so the call is fine. void* dodges
+ * -Werror=cast-function-type. Used by all three GIN vtables (v11/v13/GDAKI). */
+#define NCCL_OFI_GIN_INIT_VTABLE_FIELD(vtable) \
+	((decltype((vtable).init))(void *)nccl_ofi_gin_init)
 ncclResult_t nccl_ofi_gin_devices(int *ndev);
 ncclResult_t nccl_ofi_gin_listen(void *ctx, int dev, void *handle, void **listenComm);
 ncclResult_t nccl_ofi_gin_connect(void *ctx, void *handles[], int nranks, int rank,

@@ -19,6 +19,12 @@
 /* Forward declaration — defined at bottom of this file */
 extern ncclGin_v13_t ncclGinPlugin_v13;
 
+/* OFI domain keys (passed to get_ep/get_domain). List them all here so a new
+ * subsystem can pick a free key. RMA gets its own domain so it doesn't share an
+ * endpoint/CQ/ep_lock with GIN; everything else uses the default domain 0. */
+static constexpr unsigned int GIN_DOMAIN_KEY = 0u;
+static constexpr unsigned int RMA_DOMAIN_KEY = 0x524D41u; /* "RMA" */
+
 /**
  * Structure to hold GIN context data.
  * This is created once per NCCL communicator and passed to all listen() calls
@@ -27,13 +33,14 @@ extern ncclGin_v13_t ncclGinPlugin_v13;
  * created on the same thread.
  */
 struct nccl_ofi_gin_context {
-	uint64_t comm_id; // Unique communicator identifier (from commHash)
-	
-	// Constructor to initialize comm_id
-	explicit nccl_ofi_gin_context(uint64_t id) : comm_id(id) {}
+	uint64_t comm_id;                  // Unique communicator identifier (from commHash)
+	ncclPluginSubsystem_t subsystem;   // GIN or RMA — which backend made this
+
+	nccl_ofi_gin_context(uint64_t id, ncclPluginSubsystem_t sub) : comm_id(id), subsystem(sub) {}
 };
 
-ncclResult_t nccl_ofi_gin_init(void **ctx, uint64_t commId, ncclDebugLogger_t logFunction)
+ncclResult_t nccl_ofi_gin_init(void **ctx, uint64_t commId, ncclPluginSubsystem_t subsystem,
+			       ncclDebugLogger_t logFunction)
 {
 	if (ofi_log_function == nullptr) {
 		ofi_log_function = logFunction;
@@ -79,8 +86,10 @@ ncclResult_t nccl_ofi_gin_init(void **ctx, uint64_t commId, ncclDebugLogger_t lo
 	   This allows listen() to use comm_id as the endpoint key for
 	   endpoint lookup, giving each NCCL communicator its own
 	   endpoint instead of sharing one per thread. */
+	NCCL_OFI_INFO(NCCL_NET | NCCL_INIT, "gin: init subsystem=%s commId=0x%lx",
+		      subsystem == NCCL_PLUGIN_SUBSYSTEM_RMA ? "RMA" : "GIN", (unsigned long)commId);
 	try {
-		nccl_ofi_gin_context *context = new nccl_ofi_gin_context(commId);
+		nccl_ofi_gin_context *context = new nccl_ofi_gin_context(commId, subsystem);
 		*ctx = context;
 	} catch (const std::exception &e) {
 		NCCL_OFI_WARN("Failed to allocate GIN context: %s", e.what());
@@ -196,9 +205,17 @@ ncclResult_t nccl_ofi_gin_listen(void *ctx, int dev, void *handle, void **listen
 		communicator instead of one per thread.
 		
 		domain_key=0 uses the default domain, endpoint_key=comm_id caches endpoints
-		by communicator ID instead of thread ID. */
+		by communicator ID instead of thread ID.
 
-		auto ep = device->get_ep(0, static_cast<long>(comm_id));
+		Pick the domain by role so RMA and GIN don't share one endpoint/CQ/
+		ep_lock (keys are listed at the top of this file). */
+		const unsigned int domain_key =
+			(context->subsystem == NCCL_PLUGIN_SUBSYSTEM_RMA) ? RMA_DOMAIN_KEY : GIN_DOMAIN_KEY;
+		NCCL_OFI_INFO(NCCL_NET | NCCL_INIT,
+			      "GIN listen [role-domain]: subsystem=%s comm_id=0x%lx domain_key=0x%x dev=%d",
+			      context->subsystem == NCCL_PLUGIN_SUBSYSTEM_RMA ? "RMA" : "GIN",
+			      (unsigned long)comm_id, domain_key, dev);
+		auto ep = device->get_ep(domain_key, static_cast<long>(comm_id));
 
 		nccl_net_ofi_listen_comm *l_comm = nullptr;
 		int ret = ep->listen(static_cast<nccl_net_ofi_conn_handle_t *>(handle), &l_comm);
@@ -523,7 +540,8 @@ NCCL_OFI_EXPORT_SYMBOL ncclGin_v11_t ncclGinPlugin_v11 = {
 	   have name fixup depending on env var like nvidia_plugin_name_fixup().
 	   Also, NCCL-GIN doesn't actually look at this name parameter. */
 	.name = "Libfabric",
-	.init = nccl_ofi_gin_init,
+	/* See NCCL_OFI_GIN_INIT_VTABLE_FIELD in nccl_ofi_gin_api.h. */
+	.init = NCCL_OFI_GIN_INIT_VTABLE_FIELD(ncclGinPlugin_v11),
 	.devices = nccl_ofi_gin_devices,
 	.getProperties = nccl_ofi_gin_getProperties,
 	.listen = nccl_ofi_gin_listen,
@@ -549,7 +567,8 @@ NCCL_OFI_EXPORT_SYMBOL ncclGin_v11_t ncclGinPlugin_v11 = {
 /* GIN v13 was introduced in NCCL v2.30 */
 NCCL_OFI_EXPORT_SYMBOL ncclGin_v13_t ncclGinPlugin_v13 = {
 	.name = "Libfabric",
-	.init = nccl_ofi_gin_init,
+	/* See NCCL_OFI_GIN_INIT_VTABLE_FIELD in nccl_ofi_gin_api.h. */
+	.init = NCCL_OFI_GIN_INIT_VTABLE_FIELD(ncclGinPlugin_v13),
 	.devices = nccl_ofi_gin_devices,
 	.getProperties = nccl_ofi_gin_getProperties_v13,
 	.listen = nccl_ofi_gin_listen,
