@@ -526,13 +526,18 @@ int nccl_ofi_rdma_gin_put_comm::iputSignal(uint64_t srcOff, nccl_ofi_gin_symm_mr
 	uint16_t rail_id = 0;
 
 	/* Outstanding window. Cursors live on the GIN_RX_CONSUMED_MASK ring,
-	   so all comparisons mask the modular subtraction. */
-	const uint32_t outstanding = gin_cursor_delta(rank_comm.tx_head, rank_comm.tx_tail);
-	if (OFI_UNLIKELY(outstanding >= (uint32_t)(GIN_IMM_SEQ_MASK + 1))) {
-		NCCL_OFI_WARN("Outstanding window full (head=%u tail=%u)",
-			      rank_comm.tx_head, rank_comm.tx_tail);
-		assert(false);
-		return -EBUSY;
+	   so all comparisons mask the modular subtraction. Spin-wait while
+	   draining completions rather than returning EBUSY (which NCCL promotes
+	   to ncclSystemError and kills the proxy). */
+	uint32_t outstanding = gin_cursor_delta(rank_comm.tx_head, rank_comm.tx_tail);
+	while (OFI_UNLIKELY(outstanding >= (uint32_t)(GIN_IMM_SEQ_MASK + 1))) {
+		{
+			std::lock_guard<std::mutex> lock(gin_ep.ep_lock);
+			resources.progress();
+			drain_gdrcopy_done_queue();
+		}
+		std::this_thread::yield();
+		outstanding = gin_cursor_delta(rank_comm.tx_head, rank_comm.tx_tail);
 	}
 
 	/* Determine if this message needs an ACK.
