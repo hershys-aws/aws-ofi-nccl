@@ -76,6 +76,10 @@ public:
 
 	virtual int deregMrSym(nccl_ofi_gin_symm_mr_handle_t *mr_handle) = 0;
 
+	/* optFlags carries ncclGinOptFlags from the GIN device API. The proxy
+	 * reads the aggregate bit from each GFD and passes ncclGinOptFlagsAggregateRequests when
+	 * more ops follow on this (comm,rank); the backend may then defer the doorbell (FI_MORE)
+	 * until a non-aggregate op. */
 	virtual int iputSignal(uint64_t srcOff,
 			       nccl_ofi_gin_symm_mr_handle_t *srcMhandle,
 			       size_t size, uint64_t dstOff,
@@ -83,12 +87,13 @@ public:
 			       uint32_t rank, uint64_t signalOff,
 			       nccl_ofi_gin_symm_mr_handle_t *signalMhandle,
 			       uint64_t signalValue, uint32_t signalOp,
+			       uint32_t optFlags,
 			       nccl_ofi_gin_req_t **request) = 0;
 
 	virtual int iget(uint64_t remoteOff, nccl_ofi_gin_symm_mr_handle_t *remoteMhandle,
 			 size_t size, uint64_t localOff,
 			 nccl_ofi_gin_symm_mr_handle_t *localMhandle,
-			 uint32_t rank, nccl_ofi_gin_req_t **request) = 0;
+			 uint32_t rank, uint32_t optFlags, nccl_ofi_gin_req_t **request) = 0;
 
 	virtual int iflush(nccl_ofi_gin_symm_mr_handle_t *mhandle,
 			   uint32_t rank, nccl_ofi_gin_req_t **request) = 0;

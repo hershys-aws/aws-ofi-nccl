@@ -354,11 +354,11 @@ public:
 	int iputSignal(uint64_t srcOff, nccl_ofi_gin_symm_mr_handle_t *srcMhandle, size_t size, uint64_t dstOff,
 		       nccl_ofi_gin_symm_mr_handle_t *dstMhandle, uint32_t rank, uint64_t signalOff,
 		       nccl_ofi_gin_symm_mr_handle_t *signalMhandle, uint64_t signalValue, uint32_t signalOp,
-		       nccl_ofi_gin_req_t **request) override;
+		       uint32_t optFlags, nccl_ofi_gin_req_t **request) override;
 
 	int iget(uint64_t remoteOff, nccl_ofi_gin_symm_mr_handle_t *remoteMhandle,
 		 size_t size, uint64_t localOff, nccl_ofi_gin_symm_mr_handle_t *localMhandle,
-		 uint32_t rank, nccl_ofi_gin_req_t **request) override;
+		 uint32_t rank, uint32_t optFlags, nccl_ofi_gin_req_t **request) override;
 
 	/**
 	 * Fence prior iget operations to ensure data is visible locally.
@@ -465,6 +465,9 @@ private:
 	 *   - See handle_signal_metadata_completion / handle_signal_write_completion
 	 *     for the weak-mode early-deliver paths. */
 	bool strong_signal_ordering_enabled;
+	/* Captured once at construction: honor the device aggregate hint by
+	   deferring doorbells (FI_MORE). Avoids a per-op param-mutex acquisition on the hot path. */
+	bool aggregate_enabled;
 
 	/* For each rail, direct-indexed table of fi_addr => peer comm rank.
 	 * Requires FI_AV_TABLE so that fi_addr_t values are dense 0-based
