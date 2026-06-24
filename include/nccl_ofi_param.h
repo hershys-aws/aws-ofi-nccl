@@ -406,4 +406,13 @@ OFI_NCCL_PARAM(GIN_TYPE, gin_type, "GIN_TYPE", GIN_TYPE::PROXY)
  */
 OFI_NCCL_PARAM(bool, gin_strong_signal, "GIN_STRONG_SIGNAL", true);
 
+/*
+ * Honor the GIN device aggregate-requests hint: when set, an
+ * iput/iputSignal carrying ncclGinOptFlagsAggregateRequests defers its rail's
+ * doorbell (FI_MORE) and the deferred doorbell is flushed at the next progress
+ * tick. Disable to fall back to one doorbell per op (pre-1725 behavior).
+ * Default: true.
+ */
+OFI_NCCL_PARAM(bool, gin_aggregate, "GIN_AGGREGATE", true);
+
 #endif // End NCCL_OFI_PARAM_H_

@@ -276,8 +276,15 @@ int nccl_net_ofi_gin_write_req_t::handle_cq_entry(struct fi_cq_entry * /*cq_entr
 		*pending_flag = false;
 	}
 
-	auto *gin_comm = static_cast<nccl_ofi_rdma_gin_put_comm *>(comm);
-	gin_comm->get_resources().return_req_to_pool(this);
+	/* The doorbell-flush write is not bound to a comm and sets owning_resources
+	   so it can self-return without dereferencing a borrowed comm that may already be freed.
+	   resources is refcounted and outlives every comm. Normal writes return via their comm. */
+	if (owning_resources != nullptr) {
+		owning_resources->return_req_to_pool(this);
+	} else {
+		auto *gin_comm = static_cast<nccl_ofi_rdma_gin_put_comm *>(comm);
+		gin_comm->get_resources().return_req_to_pool(this);
+	}
 
 	return 0;
 }

@@ -367,10 +367,11 @@ public:
 	nccl_net_ofi_gin_write_req_t(struct fid_ep *ep_arg, void *src_arg, size_t size_arg,
 				     void *desc_arg, uint64_t imm_data_arg,
 				     fi_addr_t remote_addr_arg, uint64_t dest_arg, uint64_t key_arg,
-				     void* comm_arg, uint64_t msg_flags = 0)
+				     void* comm_arg, uint64_t msg_flags = 0,
+				     nccl_ofi_gin_resources *owning_resources_arg = nullptr)
 	    : ep(ep_arg), src(src_arg), size(size_arg), desc(desc_arg), imm_data(imm_data_arg),
 	      remote_addr(remote_addr_arg), dest(dest_arg), key(key_arg), flags(msg_flags),
-	      comm(comm_arg)
+	      comm(comm_arg), owning_resources(owning_resources_arg)
 	{
 	}
 	int post() override;
@@ -400,6 +401,10 @@ public:
 	   (e.g. recv_req_t), so we keep it here. */
 	void *comm;
 	bool *pending_flag;
+	/* When non-null, handle_cq_entry returns this req to the pool via owning_resources
+	 * instead of dereferencing comm. Used by the doorbell-flush write,
+	 * which is not bound to any comm; resources is refcounted and outlives all comms. */
+	nccl_ofi_gin_resources *owning_resources;
 };
 
 /**

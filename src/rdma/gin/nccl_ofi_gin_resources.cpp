@@ -586,7 +586,13 @@ int nccl_ofi_gin_resources::progress()
 		return ret;
 	}
 
-	return retry_pending_reqs();
+	ret = retry_pending_reqs();
+	if (OFI_UNLIKELY(ret != 0)) {
+		return ret;
+	}
+
+	/* Flush any deferred doorbells (bounded to one tick of deferral). */
+	return flush_pending_doorbells();
 }
 
 int nccl_ofi_gin_resources::retry_pending_reqs()
@@ -601,6 +607,75 @@ int nccl_ofi_gin_resources::retry_pending_reqs()
 		} else {
 			return ret;
 		}
+	}
+
+	return 0;
+}
+
+int nccl_ofi_gin_resources::flush_pending_doorbells()
+{
+	const uint16_t num_rails = gin_ep.get_num_rails();
+
+	/* Fast path: nothing deferred (also the steady state when GIN_AGGREGATE is off). */
+	bool any = false;
+	for (uint16_t r = 0; r < num_rails; r++) {
+		if (gin_ep.is_doorbell_pending(r)) { any = true; break; }
+	}
+	if (OFI_LIKELY(!any)) {
+		return 0;
+	}
+
+	/* 0-byte loopback write per pending rail to ring the doorbell. Not bound to any comm. */
+	if (OFI_UNLIKELY(!self_loopback_addr_valid)) {
+		NCCL_OFI_WARN("GIN doorbell pending before self loopback address was cached; "
+			      "clearing to avoid teardown stall (unexpected)");
+		assert(false);
+		for (uint16_t r = 0; r < num_rails; r++) {
+			gin_ep.clear_doorbell_pending(r);
+		}
+		return 0;
+	}
+
+	auto *flush_gpu_mr = get_flush_buff_gpu_mr_handle();
+	const uint64_t remote_offset = virt_addr_mr ? (uintptr_t)get_flush_buff_gpu() : 0;
+
+	for (uint16_t rail_id = 0; rail_id < num_rails; rail_id++) {
+		if (!gin_ep.is_doorbell_pending(rail_id)) {
+			continue;
+		}
+
+		/* Post a 0-byte write (no FI_MORE) to ring this rail's doorbell. */
+		uint64_t gpu_key = fi_mr_key(flush_gpu_mr->get_mr(rail_id));
+		void *src_desc = fi_mr_desc(flush_gpu_mr->get_mr(rail_id));
+		nccl_net_ofi_gin_write_req_t *flush_req = nullptr;
+		try {
+			flush_req = get_req_from_pool<nccl_net_ofi_gin_write_req_t>(
+				gin_ep.get_rail(rail_id).ofi_ep.get(),
+				get_flush_buff_gpu(), /*size*/ 0, src_desc, /*imm_data*/ 0,
+				self_loopback_addr[rail_id], remote_offset, gpu_key,
+				/*comm*/ nullptr, /*msg_flags*/ 0, /*owning_resources*/ this);
+		} catch (const std::exception &e) {
+			/* Pool exhausted — leave pending, retry next tick. */
+			NCCL_OFI_INFO(NCCL_NET, "GIN doorbell flush deferred (req pool full): %s",
+				      e.what());
+			return 0;
+		}
+		flush_req->pending_flag = nullptr;  /* not part of any umbrella req */
+#if HAVE_NVTX_TRACING || HAVE_LIBLTTNG_UST
+		flush_req->set_info(dev, /*rank*/ 0, /*msg_seq_num*/ 0);
+#endif
+
+		int ret = flush_req->post();
+		if (ret == -FI_EAGAIN) {
+			/* SQ full — leave pending, try other rails. */
+			return_req_to_pool(flush_req);
+			continue;
+		} else if (OFI_UNLIKELY(ret != 0)) {
+			NCCL_OFI_WARN("GIN doorbell flush failed on rail %u: %d", rail_id, ret);
+			return_req_to_pool(flush_req);
+			return ret;
+		}
+		gin_ep.clear_doorbell_pending(rail_id);
 	}
 
 	return 0;
