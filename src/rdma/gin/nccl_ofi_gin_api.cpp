@@ -34,6 +34,12 @@ struct nccl_ofi_gin_context {
 	/* Incremented per listen() call; used to bucket connections across
 	 * endpoints by owning GIN progress thread (see nccl_ofi_gin_listen). */
 	int listen_count = 0;
+
+	/* Owning GIN progress thread index for the next listen(), set by NCCL
+	 * via setHint("THREAD_IDX"). -1 means unset; the listen() path then
+	 * falls back to NCCL_GIN_PROXY_NTHREADS-based bucketing. Consumed (reset
+	 * to -1) on each listen(). */
+	int thread_idx = -1;
 };
 
 ncclResult_t nccl_ofi_gin_init(void **ctx, uint64_t commId, ncclDebugLogger_t logFunction)
@@ -174,22 +180,32 @@ ncclResult_t nccl_ofi_gin_listen(void *ctx, int dev, void *handle, void **listen
 	}
 
 	/* Bucket connections across endpoints by their owning GIN progress
-	   thread. NCCL spawns one GIN progress thread per connection and
-	   assigns connections round-robin (thread t owns connections
-	   t, t+T, t+2T, ...). Folding listen_seq % T into the endpoint key
-	   groups same-thread connections onto one endpoint, so each progress
-	   thread drives its own endpoint instead of contending on a shared
-	   completion queue. NCCL_GIN_PROXY_NTHREADS=1 (default) collapses all
+	   thread, so each progress thread drives its own endpoint instead of
+	   contending on a shared completion queue.
+
+	   Prefer an explicit thread index supplied by NCCL via
+	   setHint("THREAD_IDX") before this listen(). Absent that, fall back to
+	   listen_seq % NCCL_GIN_PROXY_NTHREADS: NCCL spawns one GIN progress
+	   thread per connection and assigns connections round-robin (thread t
+	   owns connections t, t+T, t+2T, ...), so listen_seq % T recovers the
+	   owning thread. NCCL_GIN_PROXY_NTHREADS=1 (default) collapses all
 	   connections onto the per-init seq endpoint (prior behavior). */
-	static int nthreads = -1;
-	if (nthreads < 0) {
-		const char *env = getenv("NCCL_GIN_PROXY_NTHREADS");
-		nthreads = (env && atoi(env) > 0) ? atoi(env) : 1;
+	const int listen_seq = context->listen_count++;
+	int thread_idx;
+	if (context->thread_idx >= 0) {
+		thread_idx = context->thread_idx;
+		context->thread_idx = -1;  /* consume: reset for next listen() */
+	} else {
+		static int nthreads = -1;
+		if (nthreads < 0) {
+			const char *env = getenv("NCCL_GIN_PROXY_NTHREADS");
+			nthreads = (env && atoi(env) > 0) ? atoi(env) : 1;
+		}
+		thread_idx = listen_seq % nthreads;
 	}
 
-	const int listen_seq = context->listen_count++;
 	const long endpoint_key = static_cast<long>(context->seq)
-				^ (static_cast<long>(listen_seq % nthreads) << 32);
+				^ (static_cast<long>(thread_idx) << 32);
 
 	auto plugin = nccl_net_ofi_get_plugin();
 	if (plugin == nullptr) {
@@ -419,6 +435,22 @@ ncclResult_t nccl_ofi_gin_finalize(void *ctx)
 	return ncclSuccess;
 }
 
+/* Receive an out-of-band hint from NCCL. Currently the only recognized key is
+   "THREAD_IDX", the owning GIN progress-thread index for the next listen(),
+   which the listen() path folds into the endpoint cache key (see
+   nccl_ofi_gin_listen). Unknown keys are ignored. */
+static ncclResult_t nccl_ofi_gin_setHint(void *ctx, const char *key, int value)
+{
+	if (ctx == nullptr || key == nullptr) {
+		return ncclInternalError;
+	}
+	nccl_ofi_gin_context *context = static_cast<nccl_ofi_gin_context *>(ctx);
+	if (strcmp(key, "THREAD_IDX") == 0) {
+		context->thread_idx = value;
+	}
+	return ncclSuccess;
+}
+
 static ncclResult_t nccl_ofi_gin_getProperties_v13(int dev, ncclNetProperties_v12_t *props)
 {
 	nccl_ofi_properties_t ofi_properties;
@@ -620,7 +652,8 @@ NCCL_OFI_EXPORT_SYMBOL ncclGin_v13_t ncclGinPlugin_v13 = {
 	.test = nccl_ofi_gin_test,
 	.ginProgress = nccl_ofi_gin_ginProgress,
 	.queryLastError = nullptr,
-	.finalize = nccl_ofi_gin_finalize
+	.finalize = nccl_ofi_gin_finalize,
+	.setHint = nccl_ofi_gin_setHint
 };
 
 /* GIN v14 export. Reuses v13 handlers; adds getGinProperties and v14 createContext. */
@@ -731,5 +764,6 @@ NCCL_OFI_EXPORT_SYMBOL ncclRma_v15_t ncclRmaPlugin_v15 = {
 	.rmaProgress = nccl_ofi_gin_ginProgress,
 	/* Not used by NCCL in proxy mode */
 	.queryLastError = nullptr,
-	.finalize = nccl_ofi_gin_finalize
+	.finalize = nccl_ofi_gin_finalize,
+	.setHint = nccl_ofi_gin_setHint
 };

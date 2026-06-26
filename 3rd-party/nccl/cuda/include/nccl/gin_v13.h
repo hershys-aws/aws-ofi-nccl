@@ -67,5 +67,9 @@ typedef struct {
 
   // Finalize the GIN support
   ncclResult_t (*finalize)(void* ctx);
+
+  // Set an out-of-band integer hint on the context before listen() (e.g.
+  // "THREAD_IDX"). May be NULL if not supported.
+  ncclResult_t (*setHint)(void* ctx, const char* key, int value);
 } ncclGin_v13_t;
 #endif // end include guard

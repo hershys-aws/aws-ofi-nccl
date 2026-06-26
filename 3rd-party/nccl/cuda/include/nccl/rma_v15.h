@@ -53,5 +53,9 @@ typedef struct {
   ncclResult_t (*rmaProgress)(void* rmaCtx);
   ncclResult_t (*queryLastError)(void* rmaCtx, bool* hasError);
   ncclResult_t (*finalize)(void* ctx);
+
+  // Set an out-of-band integer hint on the context before listen() (e.g.
+  // "THREAD_IDX"). May be NULL if not supported.
+  ncclResult_t (*setHint)(void* ctx, const char* key, int value);
 } ncclRma_v15_t;
 #endif
