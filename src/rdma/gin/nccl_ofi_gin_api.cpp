@@ -5,6 +5,7 @@
 #include "config.h"
 
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 
 #include "rdma/gin/nccl_ofi_gin.h"
@@ -29,6 +30,10 @@ struct nccl_ofi_gin_context {
 	static inline std::atomic<uint64_t> next_seq{0};
 
 	uint64_t seq = next_seq.fetch_add(1, std::memory_order_relaxed);
+
+	/* Incremented per listen() call; used to bucket connections across
+	 * endpoints by owning GIN progress thread (see nccl_ofi_gin_listen). */
+	int listen_count = 0;
 };
 
 ncclResult_t nccl_ofi_gin_init(void **ctx, uint64_t commId, ncclDebugLogger_t logFunction)
@@ -168,7 +173,23 @@ ncclResult_t nccl_ofi_gin_listen(void *ctx, int dev, void *handle, void **listen
 		return ncclInternalError;
 	}
 
-	long endpoint_key = static_cast<long>(context->seq);
+	/* Bucket connections across endpoints by their owning GIN progress
+	   thread. NCCL spawns one GIN progress thread per connection and
+	   assigns connections round-robin (thread t owns connections
+	   t, t+T, t+2T, ...). Folding listen_seq % T into the endpoint key
+	   groups same-thread connections onto one endpoint, so each progress
+	   thread drives its own endpoint instead of contending on a shared
+	   completion queue. NCCL_GIN_PROXY_NTHREADS=1 (default) collapses all
+	   connections onto the per-init seq endpoint (prior behavior). */
+	static int nthreads = -1;
+	if (nthreads < 0) {
+		const char *env = getenv("NCCL_GIN_PROXY_NTHREADS");
+		nthreads = (env && atoi(env) > 0) ? atoi(env) : 1;
+	}
+
+	const int listen_seq = context->listen_count++;
+	const long endpoint_key = static_cast<long>(context->seq)
+				^ (static_cast<long>(listen_seq % nthreads) << 32);
 
 	auto plugin = nccl_net_ofi_get_plugin();
 	if (plugin == nullptr) {
