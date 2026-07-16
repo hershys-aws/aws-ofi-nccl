@@ -33,7 +33,7 @@ CXXLINK = OMPI_CXX="$(CXX)" MPICH_CXX="$(CXX)" \
 if ENABLE_FUNC_TESTS
 noinst_HEADERS = functional_test.h
 
-bin_PROGRAMS = nccl_connection nccl_message_transfer ring inflight_close reuse_listen_comm gin gin_duplicate_mr grouped_recv gin_gdaki_misconfig_probe eager_multirecv
+bin_PROGRAMS = nccl_connection nccl_message_transfer ring inflight_close reuse_listen_comm gin gin_duplicate_mr grouped_recv gin_gdaki_misconfig_probe gin_gdaki_backend_version eager_multirecv
 if ENABLE_GDAKI
 if HAVE_NVCC
 bin_PROGRAMS += gin_put_gdaki_gpu gin_signal_gdaki_gpu
@@ -51,6 +51,7 @@ gin_SOURCES = $(base_sources) gin.cpp
 gin_duplicate_mr_SOURCES = $(base_sources) gin_duplicate_mr.cpp
 grouped_recv_SOURCES = $(base_sources) grouped_recv.cpp
 gin_gdaki_misconfig_probe_SOURCES = $(base_sources) gin_gdaki_misconfig_probe.cpp
+gin_gdaki_backend_version_SOURCES = $(base_sources) gin_gdaki_backend_version.cpp
 
 # GDAKI GPU smoke test. .cu compiles via the .cu.o suffix rule below,
 # .cpp via the existing CXXCOMPILE; the binary links via CXXLINK
