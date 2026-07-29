@@ -393,4 +393,18 @@ OFI_NCCL_PARAM(NVTX_TRACE_DIMENSION, nvtx_trace_dimension,  "NVTX_TRACE_DIMENSIO
  */
 OFI_NCCL_PARAM(bool, gin_strong_signal, "GIN_STRONG_SIGNAL", true);
 
+/*
+ * Honor the aggregate-requests hint for the GIN plugin.
+ *
+ * When true, an iput/iputSignal carrying ncclRmaOptFlagsAggregateRequests
+ * defers its rail's doorbell (posts the write with FI_MORE); the deferred
+ * doorbell is flushed at the next progress tick. This coalesces a batch of
+ * writes into a single doorbell instead of ringing one per operation.
+ *
+ * When false, every operation rings its own doorbell.
+ *
+ * Default: true.
+ */
+OFI_NCCL_PARAM(bool, gin_aggregate, "GIN_AGGREGATE", true);
+
 #endif // End NCCL_OFI_PARAM_H_
