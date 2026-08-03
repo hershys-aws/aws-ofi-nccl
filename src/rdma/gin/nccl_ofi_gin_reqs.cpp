@@ -270,14 +270,25 @@ int nccl_net_ofi_gin_write_req_t::post()
 int nccl_net_ofi_gin_write_req_t::handle_cq_entry(struct fi_cq_entry * /*cq_entry_base*/,
 						   fi_addr_t /*src_addr*/, uint16_t rail_id)
 {
-	NCCL_OFI_TRACE_GIN_WRITE_END(dev, rail_id, comm, rank, msg_seq_num, this);
+	/* The doorbell-flush write has no comm (owning_resources set) and emitted no
+	   paired WRITE_BEGIN; skip the trace, whose NVTX backend dereferences comm. */
+	if (OFI_LIKELY(comm != nullptr)) {
+		NCCL_OFI_TRACE_GIN_WRITE_END(dev, rail_id, comm, rank, msg_seq_num, this);
+	}
 
 	if (OFI_LIKELY(pending_flag != nullptr)) {
 		*pending_flag = false;
 	}
 
-	auto *gin_comm = static_cast<nccl_ofi_rdma_gin_put_comm *>(comm);
-	gin_comm->get_resources().return_req_to_pool(this);
+	/* The doorbell-flush write is not bound to a comm and sets owning_resources
+	   so it can self-return without dereferencing a borrowed comm that may already be freed.
+	   resources is refcounted and outlives every comm. Normal writes return via their comm. */
+	if (owning_resources != nullptr) {
+		owning_resources->return_req_to_pool(this);
+	} else {
+		auto *gin_comm = static_cast<nccl_ofi_rdma_gin_put_comm *>(comm);
+		gin_comm->get_resources().return_req_to_pool(this);
+	}
 
 	return 0;
 }

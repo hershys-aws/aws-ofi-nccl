@@ -119,8 +119,23 @@ public:
 	 */
 	void close_ofi_eps();
 
+	/* Per-rail deferred-doorbell tracking for FI_MORE. Mutated under ep_lock. */
+	void mark_doorbell_pending(uint16_t rail_id)
+	{
+		doorbell_pending[rail_id] = true;
+	}
+	void clear_doorbell_pending(uint16_t rail_id)
+	{
+		doorbell_pending[rail_id] = false;
+	}
+	bool is_doorbell_pending(uint16_t rail_id) const
+	{
+		return doorbell_pending[rail_id];
+	}
+
 	std::mutex ep_lock;
 private:
+	std::array<bool, MAX_NUM_RAILS> doorbell_pending{};
 	nccl_net_ofi_domain_t &domain;
 
 	uint16_t num_rails;
@@ -253,6 +268,15 @@ public:
 			throw std::runtime_error("Failed to insert comm_id");
 		}
 		gin_comms[comm_id] = &comm;
+	}
+
+	/* Set once by connect(); used by flush_pending_doorbells(). */
+	void set_self_loopback_addr(const fi_addr_t *addr, uint16_t num_rails_arg)
+	{
+		for (uint16_t r = 0; r < num_rails_arg; r++) {
+			self_loopback_addr[r] = addr[r];
+		}
+		self_loopback_addr_valid = true;
 	}
 
 	/**
@@ -436,6 +460,10 @@ private:
 	void *flush_buff_gpu = nullptr;
 	nccl_ofi_gin_mr_handle_t *flush_buff_gpu_mr_handle = nullptr;
 
+	/* Per-rail loopback AV addresses for the doorbell flush. */
+	std::array<fi_addr_t, MAX_NUM_RAILS> self_loopback_addr{};
+	bool self_loopback_addr_valid = false;
+
 	/* === Tier 3 — accessed only at connect/disconnect time === */
 	nccl_ofi_idpool_t comm_id_pool;
 
@@ -451,6 +479,9 @@ private:
 	 * completion queue
 	 */
 	int retry_pending_reqs();
+
+	/* Flush deferred doorbells. Called every progress tick. Requires ep_lock. */
+	int flush_pending_doorbells();
 
 	/* Post all recv buffers for a given rail */
 	void post_rx_buffs_on_rail(nccl_ofi_gin_ep_rail_t &rail, size_t num_buffers);

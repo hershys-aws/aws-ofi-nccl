@@ -8,6 +8,7 @@
 #include <thread>
 
 #include "rdma/gin/nccl_ofi_gin.h"
+#include <nccl/rma_v15.h>  /* ncclRmaOptFlagsAggregateRequests (vendored op-table contract) */
 
 #include "nccl_ofi_assert.h"
 #include "nccl_ofi_cuda.h"
@@ -263,6 +264,12 @@ int nccl_ofi_rdma_gin_listen_comm::connect(nccl_net_ofi_conn_handle_t *handles[]
 		}
 	}
 
+	/* Cache this rank's loopback addresses on the shared resources so the doorbell-flush
+	   write needs no comm. Done now that the self AV entry is populated; idempotent
+	   across comms (all share the EP/AV). */
+	gin_comm->resources.set_self_loopback_addr(gin_comm->rank_comms[rank].address,
+						   static_cast<uint16_t>(num_rails));
+
 	(*gin_comm_out) = gin_comm;
 	return 0;
 }
@@ -480,6 +487,34 @@ int nccl_ofi_rdma_gin_put_comm::await_pending_requests()
 
 	NCCL_OFI_TRACE(NCCL_NET, "GIN communicator: awaiting pending acks");
 
+	/* Ring any doorbell an aggregated op deferred but that no further progress tick would
+	   reach (e.g. a final pure-put batch that requested no ACK). Loop progress() -- which runs
+	   the per-rail doorbell flush -- until no rail remains pending, so a flush that hit
+	   -FI_EAGAIN (SQ momentarily full, leaving the rail pending) is retried rather than
+	   stranded before we wait/close. */
+	{
+		auto &flush_ep = resources.get_ep();
+		const uint16_t flush_num_rails = flush_ep.get_num_rails();
+		while (true) {
+			std::lock_guard<std::mutex> lock(ep_lock);
+			ret = resources.progress();
+			if (OFI_UNLIKELY(ret != 0)) {
+				return ret;
+			}
+			bool still_pending = false;
+			for (uint16_t r = 0; r < flush_num_rails; r++) {
+				if (flush_ep.is_doorbell_pending(r)) {
+					still_pending = true;
+					break;
+				}
+			}
+			if (!still_pending) {
+				break;
+			}
+			std::this_thread::yield();
+		}
+	}
+
 	/* Wait until all ACKs we requested have been received. Only ops
 	   that set is_ack_requested on the wire will generate a standalone
 	   ACK from the receiver. We track the sequence number of the last
@@ -556,9 +591,9 @@ int nccl_ofi_rdma_gin_put_comm::iputSignal(uint64_t srcOff, nccl_ofi_gin_symm_mr
 				  uint64_t signalValue, uint32_t signalOp, uint32_t optFlags,
 				  nccl_ofi_gin_req_t **request)
 {
-	/* optFlags carries ncclRmaOptFlags from the v15 RMA op-table. The aggregate
-	   hint is honored in a later change; threaded through here behavior-neutral. */
-	(void)optFlags;
+	/* Defer this rail's doorbell (FI_MORE) when NCCL requests aggregation via the
+	   v15 op-table; flushed at the next progress tick by flush_pending_doorbells(). */
+	const bool aggregate = (optFlags & ncclRmaOptFlagsAggregateRequests) != 0;
 	auto *src_mr = static_cast<nccl_ofi_rdma_gin_symm_mr_handle *>(srcMhandle);
 	auto *dst_mr = static_cast<nccl_ofi_rdma_gin_symm_mr_handle *>(dstMhandle);
 	auto *sig_mr = static_cast<nccl_ofi_rdma_gin_symm_mr_handle *>(signalMhandle);
@@ -668,10 +703,11 @@ int nccl_ofi_rdma_gin_put_comm::iputSignal(uint64_t srcOff, nccl_ofi_gin_symm_mr
 			nccl_net_ofi_xfer_info_t *xfer_info = &xfers[rail_it];
 			void *desc = fi_mr_desc(src_mhandle->get_mr(xfer_info->rail_id));
 
-			/* Set FI_MORE on the first write when it shares a rail
-			 * with the subsequent metadata send */
+			/* Set FI_MORE to defer the doorbell: either the metadata send follows
+			   on this rail (intra-op), or optFlags requested aggregation (cross-op). */
+			const uint16_t wr_rail = xfer_info->rail_id;
 			uint64_t wr_flags = FI_REMOTE_CQ_DATA;
-			if (has_signal && rail_it == 0)
+			if ((has_signal && rail_it == 0) || aggregate)
 				wr_flags |= FI_MORE;
 
 			auto write_req = resources.get_req_from_pool<nccl_net_ofi_gin_write_req_t>(
@@ -693,9 +729,12 @@ int nccl_ofi_rdma_gin_put_comm::iputSignal(uint64_t srcOff, nccl_ofi_gin_symm_mr
 			ret = write_req->post();
 			if (OFI_UNLIKELY(ret != 0)) {
 				if (ret == -FI_EAGAIN) {
+					/* SQ full: queue for retry (without FI_MORE). Must not break --
+					   all stripes must be posted or queued to avoid a receiver hang. */
+					gin_ep.clear_doorbell_pending(wr_rail);
 					resources.add_pending_req(write_req);
 					ret = 0;
-					break;
+					continue;
 				}
 				NCCL_OFI_WARN("Write failed for seq_num %hu", msg_seq_num);
 				resources.return_req_to_pool(write_req);
@@ -703,6 +742,15 @@ int nccl_ofi_rdma_gin_put_comm::iputSignal(uint64_t srcOff, nccl_ofi_gin_symm_mr
 				clear_write_reqs_pending_back_pointers(write_reqs);
 				resources.return_req_to_pool(req);
 				return ret;
+			}
+
+			/* Track which rails have a deferred doorbell. The first write's doorbell
+			   is flushed by the metadata send below, so it doesn't count. */
+			if (wr_flags & FI_MORE) {
+				if (!(has_signal && rail_it == 0))
+					gin_ep.mark_doorbell_pending(wr_rail);
+			} else {
+				gin_ep.clear_doorbell_pending(wr_rail);
 			}
 		}
 		nccl_net_ofi_release_schedule(scheduler, schedule);
@@ -764,6 +812,8 @@ int nccl_ofi_rdma_gin_put_comm::iputSignal(uint64_t srcOff, nccl_ofi_gin_symm_mr
 				return ret;
 			}
 		}
+		/* Metadata send rings the doorbell (no FI_MORE). */
+		gin_ep.clear_doorbell_pending(rail_id);
 		send_req->pending_flag = &(req->reqs_pending[MAX_NUM_RAILS]); // last one
 #if HAVE_NVTX_TRACING || HAVE_LIBLTTNG_UST
 		send_req->set_info(dev, dst_rank, msg_seq_num);
