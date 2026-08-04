@@ -689,6 +689,10 @@ private:
 	 *   - See handle_signal_metadata_completion / handle_signal_write_completion
 	 *     for the weak-mode early-deliver paths. */
 	bool strong_signal_ordering_enabled;
+	/* Rail pinned across an aggregated iputSignal sequence: when an op is
+	   posted with FI_MORE, the next op must reuse this rail to flush it.
+	   -1 means no pin (consult get_next_rail()). Guarded by ep_lock. */
+	int pinned_rail_id = -1;
 
 	/* For each rail, direct-indexed table of fi_addr => peer comm rank.
 	 * Requires FI_AV_TABLE so that fi_addr_t values are dense 0-based

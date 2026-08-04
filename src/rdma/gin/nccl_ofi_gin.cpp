@@ -556,9 +556,9 @@ int nccl_ofi_rdma_gin_put_comm::iputSignal(uint64_t srcOff, nccl_ofi_gin_symm_mr
 				  uint64_t signalValue, uint32_t signalOp, uint32_t optFlags,
 				  nccl_ofi_gin_req_t **request)
 {
-	/* optFlags carries ncclRmaOptFlags from the v15 RMA op-table. The aggregate
-	   hint is honored in a later change; threaded through here behavior-neutral. */
-	(void)optFlags;
+	/* Honor the aggregate-requests hint: post ops with FI_MORE and pin the
+	   rail so the next op flushes the deferred doorbell (see below). */
+	const bool aggregate = (optFlags & ncclRmaOptFlagsAggregateRequests) != 0;
 	auto *src_mr = static_cast<nccl_ofi_rdma_gin_symm_mr_handle *>(srcMhandle);
 	auto *dst_mr = static_cast<nccl_ofi_rdma_gin_symm_mr_handle *>(dstMhandle);
 	auto *sig_mr = static_cast<nccl_ofi_rdma_gin_symm_mr_handle *>(signalMhandle);
@@ -574,10 +574,13 @@ int nccl_ofi_rdma_gin_put_comm::iputSignal(uint64_t srcOff, nccl_ofi_gin_symm_mr
 	uint16_t msg_seq_num = rank_comm.tx_head & GIN_IMM_SEQ_MASK;
 	uint32_t remote_comm_id = rank_comm.comm_id;
 	auto scheduler = gin_ep.get_scheduler();
-	/* rail_id for metadata send is determined below: either from the
-	   scheduler's first write rail (for coalescing) or from
-	   get_next_rail() when there is no data to coalesce with. */
+	/* Rail carrying this op's metadata send (and, for a single-rail
+	   schedule, its write). Assigned inside the size branch below. */
 	uint16_t rail_id = 0;
+	/* True when this op takes the pin + doorbell-coalescing path (a
+	   single-rail schedule or a signal-only op); false for a multi-rail
+	   striped op, which self-flushes every rail it touches. */
+	bool coalesce = false;
 
 	/* Wait for a free slot in the TX window if full. */
 	{
@@ -640,74 +643,142 @@ int nccl_ofi_rdma_gin_put_comm::iputSignal(uint64_t srcOff, nccl_ofi_gin_symm_mr
 	NCCL_OFI_TRACE_GIN_IPUT_SIGNAL_BEGIN(dev, size, this, dst_rank, msg_seq_num, req);
 
 	if (OFI_LIKELY(size > 0)) {
-		/* Post write-immediate request with user data */
 		void *src = static_cast<uint8_t *>(src_mr->input_address) + srcOff;
 		auto *src_mhandle = src_mr->local_handle;
 
+		/* Keep the multi-rail scheduler: large transfers stripe across
+		   every NIC for bandwidth. Doorbell coalescing (pin + FI_MORE) is
+		   applied only when the scheduler returns a single-rail schedule --
+		   the small, bursty ops (e.g. MoE dispatch) where doorbell overhead
+		   dominates the tiny transfer. */
 		const auto schedule =
 			scheduler->get_schedule(size, gin_ep.get_num_rails());
+		if (OFI_UNLIKELY(schedule == nullptr)) {
+			clear_write_reqs_pending_back_pointers(write_reqs);
+			resources.return_req_to_pool(req);
+			return -ENOMEM;
+		}
 		auto &xfers = schedule->rail_xfer_infos;
+		const uint16_t num_xfers = schedule->num_xfer_infos;
 
-		nseg += schedule->num_xfer_infos;
+		nseg += num_xfers;
 		assert_always(nseg > 0);
 
 		uint64_t data = GIN_IMM_SEG_DATA(remote_comm_id, msg_seq_num, nseg, is_ack_requested);
 
 		auto &dest_remote_mr = dst_mr->remote_mr[dst_rank];
 		uint64_t dest = dest_remote_mr.address_offset + dstOff;
-		int wr_it = 0;
 
-		/* When sending both data and metadata (put+signal), colocate
-		 * the first write and the metadata send on the same rail.
-		 * The first write is posted with FI_MORE to hint the provider
-		 * that more operations follow on this EP, enabling doorbell
-		 * coalescing (single PCIe doorbell for write + send). */
-		rail_id = xfers[0].rail_id;
+		/* Single-rail schedule -> pin + coalesce; multi-rail -> stripe. */
+		coalesce = (num_xfers == 1);
 
-		for (uint16_t rail_it = 0; rail_it < schedule->num_xfer_infos; rail_it++) {
-			nccl_net_ofi_xfer_info_t *xfer_info = &xfers[rail_it];
-			void *desc = fi_mr_desc(src_mhandle->get_mr(xfer_info->rail_id));
+		if (coalesce) {
+			/* Reuse the rail a prior aggregated op pinned (so this op's
+			   doorbell flushes it), else adopt the scheduler's choice and
+			   pin from here. */
+			rail_id = (pinned_rail_id >= 0)
+				? static_cast<uint16_t>(pinned_rail_id)
+				: xfers[0].rail_id;
 
-			/* Set FI_MORE on the first write when it shares a rail
-			 * with the subsequent metadata send */
+			void *desc = fi_mr_desc(src_mhandle->get_mr(rail_id));
+
+			/* FI_MORE coalesces this write with the metadata send on the
+			   same rail (put+signal); when aggregating it also defers the
+			   doorbell so the next op pinned to this rail flushes it. */
 			uint64_t wr_flags = FI_REMOTE_CQ_DATA;
-			if (has_signal && rail_it == 0)
+			if (has_signal || aggregate)
 				wr_flags |= FI_MORE;
 
 			auto write_req = resources.get_req_from_pool<nccl_net_ofi_gin_write_req_t>(
-				gin_ep.get_rail(xfer_info->rail_id).ofi_ep.get(),
-				(void *)((uintptr_t)src + xfer_info->offset), xfer_info->msg_size,
-				desc, data, rank_comm.address[xfer_info->rail_id],
-				dest + xfer_info->offset, dest_remote_mr.mr_key[xfer_info->rail_id],
-				this, wr_flags);
+				gin_ep.get_rail(rail_id).ofi_ep.get(),
+				src, size, desc, data, rank_comm.address[rail_id],
+				dest, dest_remote_mr.mr_key[rail_id], this, wr_flags);
 
-			write_req->pending_flag = &(req->reqs_pending[wr_it]);
+			write_req->pending_flag = &(req->reqs_pending[0]);
 #if HAVE_NVTX_TRACING || HAVE_LIBLTTNG_UST
 			write_req->set_info(dev, dst_rank, msg_seq_num);
 #endif
-			req->reqs_pending[wr_it] = true;
-			write_reqs[wr_it++] = write_req;
+			req->reqs_pending[0] = true;
+			write_reqs[0] = write_req;
 
-			NCCL_OFI_TRACE_GIN_WRITE_BEGIN(dev, xfer_info->rail_id, xfer_info->msg_size,
-						       this, dst_rank, msg_seq_num, write_req);
+			NCCL_OFI_TRACE_GIN_WRITE_BEGIN(dev, rail_id, size, this, dst_rank,
+						       msg_seq_num, write_req);
 			ret = write_req->post();
 			if (OFI_UNLIKELY(ret != 0)) {
 				if (ret == -FI_EAGAIN) {
+					/* SQ full: queue for retry (FI_MORE dropped on retry). */
 					resources.add_pending_req(write_req);
 					ret = 0;
-					break;
+				} else {
+					NCCL_OFI_WARN("Write failed for seq_num %hu", msg_seq_num);
+					resources.return_req_to_pool(write_req);
+					nccl_net_ofi_release_schedule(scheduler, schedule);
+					clear_write_reqs_pending_back_pointers(write_reqs);
+					resources.return_req_to_pool(req);
+					return ret;
 				}
-				NCCL_OFI_WARN("Write failed for seq_num %hu", msg_seq_num);
-				resources.return_req_to_pool(write_req);
-				nccl_net_ofi_release_schedule(scheduler, schedule);
-				clear_write_reqs_pending_back_pointers(write_reqs);
-				resources.return_req_to_pool(req);
-				return ret;
+			}
+		} else {
+			/* Multi-rail: stripe across rails, colocating the metadata
+			   send with the first stripe. No cross-op FI_MORE -- each
+			   stripe rings its own doorbell, which also flushes any rail a
+			   prior pinned burst deferred (a 2-rail striped op touches both
+			   rails), so nothing is stranded. */
+			rail_id = xfers[0].rail_id;
+			int wr_it = 0;
+
+			for (uint16_t rail_it = 0; rail_it < num_xfers; rail_it++) {
+				nccl_net_ofi_xfer_info_t *xfer_info = &xfers[rail_it];
+				void *desc = fi_mr_desc(src_mhandle->get_mr(xfer_info->rail_id));
+
+				/* FI_MORE only to coalesce the first stripe's doorbell
+				   with the metadata send that follows on the same rail. */
+				uint64_t wr_flags = FI_REMOTE_CQ_DATA;
+				if (has_signal && rail_it == 0)
+					wr_flags |= FI_MORE;
+
+				auto write_req = resources.get_req_from_pool<nccl_net_ofi_gin_write_req_t>(
+					gin_ep.get_rail(xfer_info->rail_id).ofi_ep.get(),
+					(void *)((uintptr_t)src + xfer_info->offset), xfer_info->msg_size,
+					desc, data, rank_comm.address[xfer_info->rail_id],
+					dest + xfer_info->offset, dest_remote_mr.mr_key[xfer_info->rail_id],
+					this, wr_flags);
+
+				write_req->pending_flag = &(req->reqs_pending[wr_it]);
+#if HAVE_NVTX_TRACING || HAVE_LIBLTTNG_UST
+				write_req->set_info(dev, dst_rank, msg_seq_num);
+#endif
+				req->reqs_pending[wr_it] = true;
+				write_reqs[wr_it++] = write_req;
+
+				NCCL_OFI_TRACE_GIN_WRITE_BEGIN(dev, xfer_info->rail_id, xfer_info->msg_size,
+							       this, dst_rank, msg_seq_num, write_req);
+				ret = write_req->post();
+				if (OFI_UNLIKELY(ret != 0)) {
+					if (ret == -FI_EAGAIN) {
+						/* SQ full: queue for retry (FI_MORE dropped on
+						   retry). Must not break -- every stripe must be
+						   posted or queued or the receiver hangs. */
+						resources.add_pending_req(write_req);
+						ret = 0;
+						continue;
+					}
+					NCCL_OFI_WARN("Write failed for seq_num %hu", msg_seq_num);
+					resources.return_req_to_pool(write_req);
+					nccl_net_ofi_release_schedule(scheduler, schedule);
+					clear_write_reqs_pending_back_pointers(write_reqs);
+					resources.return_req_to_pool(req);
+					return ret;
+				}
 			}
 		}
 		nccl_net_ofi_release_schedule(scheduler, schedule);
 	} else {
-		rail_id = resources.get_next_rail();
+		/* Signal-only: no data write, treat as single-rail (pin-eligible). */
+		coalesce = true;
+		rail_id = (pinned_rail_id >= 0)
+			? static_cast<uint16_t>(pinned_rail_id)
+			: resources.get_next_rail();
 	}
 
 	if (has_signal) {
@@ -741,13 +812,16 @@ int nccl_ofi_rdma_gin_put_comm::iputSignal(uint64_t srcOff, nccl_ofi_gin_symm_mr
 			metadata_send->signal_value = 0;
 		}
 
-		/* This send flushes the QP work queue on the first rail,
-		   issuing a doorbell that includes the coalesced writedata
-		   WQE posted with FI_MORE above. */
+		/* This send normally flushes the rail's QP, ringing a doorbell that
+		   includes the FI_MORE-coalesced write above. Only when this op both
+		   coalesces (single-rail) and aggregates is the send itself deferred
+		   with FI_MORE, to be flushed by the next op pinned to this rail. */
+		const bool defer_doorbell = coalesce && aggregate;
 		nccl_net_ofi_gin_metadata_send_req_t *send_req;
 		send_req = resources.get_req_from_pool<nccl_net_ofi_gin_metadata_send_req_t>(
 			gin_ep.get_rail(rail_id).ofi_ep.get(), rail_id, metadata_elem,
-			rank_comm.address[rail_id], metadata_fl.get(), this);
+			rank_comm.address[rail_id], metadata_fl.get(), this,
+			defer_doorbell ? (uint64_t)FI_MORE : 0);
 
 		NCCL_OFI_TRACE_GIN_METADATA_SEND_BEGIN(dev, rail_id, sizeof(nccl_net_ofi_gin_signal_metadata_msg_t), this, dst_rank, msg_seq_num,
 						       send_req);
@@ -770,6 +844,12 @@ int nccl_ofi_rdma_gin_put_comm::iputSignal(uint64_t srcOff, nccl_ofi_gin_symm_mr
 #endif
 		req->reqs_pending[MAX_NUM_RAILS] = true;
 	}
+
+	/* Pin the rail for the next op iff this op coalesced (single-rail) and
+	   the aggregate hint is set -- its doorbell was deferred and the next
+	   op pinned here flushes it. Otherwise release the pin: a multi-rail or
+	   non-aggregated op already rang its doorbell(s) and flushed. */
+	pinned_rail_id = (coalesce && aggregate) ? static_cast<int>(rail_id) : -1;
 
 	rank_comm.tx_head = gin_cursor_inc(rank_comm.tx_head);
 
